@@ -10,4 +10,5 @@ numpy
 pandas
 scikit-learn
 joblib
+gunicorn
 # tensorflow>=2.15  # Optional: requires Python 3.9-3.12. Install manually if needed.
