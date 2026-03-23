@@ -1,0 +1,20 @@
+# Project Documentation: REFLEX (Smart Vehicle Safety Monitor)
+
+This plan outlines the creation of a comprehensive document detailing the working, AI/ML components, and backend actions of the REFLEX project.
+
+## Proposed Changes
+
+### Documentation
+#### [NEW] [project_working.md](file:///C:/Users/Akash/.gemini/antigravity/brain/8b11dfbb-f4fc-4e05-84b2-c1e1a3fbcf35/project_working.md)
+Create a detailed technical document covering:
+- **System Architecture**: High-level overview of Mobile-Backend interactions.
+- **AI/ML Working**: Details on the Random Forest model, feature engineering, and real-time inference.
+- **Backend Logic**: Explanation of [TriggerAPI](file:///d:/accinew/Reflex-main/backend/sensors/views.py#34-104) and rule-based event detection.
+- **Backactions**: Deep dive into the SOS alert system, Twilio integration, and emergency contact management.
+- **Mobile Integration**: How sensors are used and how the UI provides real-time feedback.
+
+## Verification Plan
+
+### Manual Verification
+- Review the generated `project_working.md` to ensure all technical details (thresholds, model features, API endpoints) match the codebase accurately.
+- Verify that the "Backaction" section correctly describes the Twilio integration and fallback mechanisms.

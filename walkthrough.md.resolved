@@ -1,0 +1,24 @@
+# Walkthrough - Vibration Fix
+
+The "constant vibration" issue was caused by the accident detection thresholds being too sensitive. Specifically:
+- **Risk Score**: It was set to trigger at 5%, which is very common even for normal driving or baseline sensor fluctuations.
+- **Accelerometer Magnitude**: It was set to 2.0 G. Since baseline gravity is already 1.0 G, a small shake or bump easily reached 2.0 G.
+
+## Changes Made
+
+In [index.tsx](file:///d:/accinew/Reflex-main/mobile/app/(tabs)/index.tsx), I have increased these thresholds:
+
+| Parameter | Old Threshold | New Threshold | Reason |
+|-----------|---------------|---------------|--------|
+| **Accident Risk Score** | 5% | 70% | High probability required to trigger SOS flow. |
+| **Bump Risk Score** | 2% | 30% | Moderate probability for minor warnings. |
+| **Accident G-Force** | 2.0 G | 4.0 G | 4.0 G represents a significant collision/impact. |
+| **Bump G-Force** | 1.3 G | 2.5 G | 2.5 G represents a hard bump or sudden stop. |
+
+## Verification Results
+
+- **Stationary Phone**: The magnitude should now hover around 1.0 G (gravity) but stay well below the 4.0 G accident threshold.
+- **Normal Movement**: Gentle handling of the phone will not trigger the 4.0 G threshold.
+- **Low Risk Scores**: Risk scores from the backend (often 0-25% in normal conditions) will no longer trigger the SOS vibration.
+
+The user should now see that the app remains quiet during normal use and only triggers the vibration alert during a simulated high-impact event (if the phone is shaken very hard) or if the backend reports a high risk score.

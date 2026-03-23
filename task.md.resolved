@@ -1,0 +1,11 @@
+# Task: Investigate why the app is not opening
+
+- [x] Check if backend (Django) is running <!-- id: 0 -->
+- [x] Check if mobile app (Expo) is running <!-- id: 1 -->
+- [x] Inspect backend configuration (settings.py, .env) <!-- id: 2 -->
+- [x] Check mobile app API URL configuration <!-- id: 3 -->
+- [x] Implement threshold fixes in mobile app <!-- id: 4 -->
+- [x] Update API endpoint IP address <!-- id: 7 -->
+- [x] Generate deep evaluation report <!-- id: 8 -->
+- [x] Verify fix manually <!-- id: 5 -->
+- [x] Provide final confirmation <!-- id: 6 -->

@@ -1,0 +1,200 @@
+[
+  {
+    "lat_min": 28.4,
+    "lat_max": 28.9,
+    "lon_min": 76.8,
+    "lon_max": 77.5,
+    "city": "Delhi",
+    "state": "Delhi",
+    "avg_accident_rate": 45.2,
+    "total_yearly_accidents": 16498,
+    "risk_level": "High"
+  },
+  {
+    "lat_min": 28.3,
+    "lat_max": 28.8,
+    "lon_min": 77.0,
+    "lon_max": 77.4,
+    "city": "Gurgaon",
+    "state": "Haryana",
+    "avg_accident_rate": 38.5,
+    "total_yearly_accidents": 14052,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 26.7,
+    "lat_max": 27.0,
+    "lon_min": 75.6,
+    "lon_max": 75.9,
+    "city": "Jaipur",
+    "state": "Rajasthan",
+    "avg_accident_rate": 32.1,
+    "total_yearly_accidents": 11716,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 30.6,
+    "lat_max": 30.8,
+    "lon_min": 76.6,
+    "lon_max": 76.9,
+    "city": "Chandigarh",
+    "state": "Chandigarh",
+    "avg_accident_rate": 28.4,
+    "total_yearly_accidents": 10366,
+    "risk_level": "Low"
+  },
+  {
+    "lat_min": 18.9,
+    "lat_max": 19.3,
+    "lon_min": 72.7,
+    "lon_max": 73.0,
+    "city": "Mumbai",
+    "state": "Maharashtra",
+    "avg_accident_rate": 52.3,
+    "total_yearly_accidents": 19089,
+    "risk_level": "High"
+  },
+  {
+    "lat_min": 18.4,
+    "lat_max": 18.7,
+    "lon_min": 73.7,
+    "lon_max": 74.0,
+    "city": "Pune",
+    "state": "Maharashtra",
+    "avg_accident_rate": 41.7,
+    "total_yearly_accidents": 15220,
+    "risk_level": "High"
+  },
+  {
+    "lat_min": 23.0,
+    "lat_max": 23.2,
+    "lon_min": 72.5,
+    "lon_max": 72.7,
+    "city": "Ahmedabad",
+    "state": "Gujarat",
+    "avg_accident_rate": 36.9,
+    "total_yearly_accidents": 13468,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 21.1,
+    "lat_max": 21.3,
+    "lon_min": 79.0,
+    "lon_max": 79.2,
+    "city": "Nagpur",
+    "state": "Maharashtra",
+    "avg_accident_rate": 33.2,
+    "total_yearly_accidents": 12118,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 12.8,
+    "lat_max": 13.1,
+    "lon_min": 77.5,
+    "lon_max": 77.7,
+    "city": "Bangalore",
+    "state": "Karnataka",
+    "avg_accident_rate": 48.6,
+    "total_yearly_accidents": 17739,
+    "risk_level": "High"
+  },
+  {
+    "lat_min": 13.0,
+    "lat_max": 13.2,
+    "lon_min": 80.1,
+    "lon_max": 80.4,
+    "city": "Chennai",
+    "state": "Tamil Nadu",
+    "avg_accident_rate": 44.3,
+    "total_yearly_accidents": 16169,
+    "risk_level": "High"
+  },
+  {
+    "lat_min": 17.3,
+    "lat_max": 17.5,
+    "lon_min": 78.3,
+    "lon_max": 78.6,
+    "city": "Hyderabad",
+    "state": "Telangana",
+    "avg_accident_rate": 39.8,
+    "total_yearly_accidents": 14526,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 11.0,
+    "lat_max": 11.2,
+    "lon_min": 76.9,
+    "lon_max": 77.1,
+    "city": "Coimbatore",
+    "state": "Tamil Nadu",
+    "avg_accident_rate": 31.5,
+    "total_yearly_accidents": 11497,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 22.5,
+    "lat_max": 22.7,
+    "lon_min": 88.3,
+    "lon_max": 88.5,
+    "city": "Kolkata",
+    "state": "West Bengal",
+    "avg_accident_rate": 46.1,
+    "total_yearly_accidents": 16826,
+    "risk_level": "High"
+  },
+  {
+    "lat_min": 25.5,
+    "lat_max": 25.7,
+    "lon_min": 85.1,
+    "lon_max": 85.3,
+    "city": "Patna",
+    "state": "Bihar",
+    "avg_accident_rate": 42.7,
+    "total_yearly_accidents": 15585,
+    "risk_level": "High"
+  },
+  {
+    "lat_min": 20.2,
+    "lat_max": 20.4,
+    "lon_min": 85.8,
+    "lon_max": 86.0,
+    "city": "Bhubaneswar",
+    "state": "Odisha",
+    "avg_accident_rate": 29.3,
+    "total_yearly_accidents": 10694,
+    "risk_level": "Low"
+  },
+  {
+    "lat_min": 23.2,
+    "lat_max": 23.4,
+    "lon_min": 77.3,
+    "lon_max": 77.5,
+    "city": "Bhopal",
+    "state": "Madhya Pradesh",
+    "avg_accident_rate": 35.4,
+    "total_yearly_accidents": 12921,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 21.2,
+    "lat_max": 21.4,
+    "lon_min": 81.6,
+    "lon_max": 81.8,
+    "city": "Raipur",
+    "state": "Chhattisgarh",
+    "avg_accident_rate": 30.8,
+    "total_yearly_accidents": 11242,
+    "risk_level": "Medium"
+  },
+  {
+    "lat_min": 26.1,
+    "lat_max": 26.3,
+    "lon_min": 91.7,
+    "lon_max": 91.9,
+    "city": "Guwahati",
+    "state": "Assam",
+    "avg_accident_rate": 27.6,
+    "total_yearly_accidents": 10074,
+    "risk_level": "Low"
+  }
+]

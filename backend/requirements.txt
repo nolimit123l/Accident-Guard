@@ -1,0 +1,13 @@
+django>=4.2
+djangorestframework
+django-cors-headers
+redis
+celery
+requests
+twilio
+python-dotenv
+numpy
+pandas
+scikit-learn
+joblib
+# tensorflow>=2.15  # Optional: requires Python 3.9-3.12. Install manually if needed.
