@@ -1,171 +1,218 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Platform, Dimensions, SafeAreaView, Alert, Animated, Vibration, TextInput } from 'react-native';
-import { Accelerometer, Gyroscope } from 'expo-sensors';
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, Vibration, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
-import * as Haptics from 'expo-haptics';
-import axios from 'axios';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { LineChart } from 'react-native-chart-kit';
-import { LinearGradient } from 'expo-linear-gradient';
 import * as Contacts from 'expo-contacts';
+import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
+import { Accelerometer, Gyroscope } from 'expo-sensors';
+import { LinearGradient } from 'expo-linear-gradient';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { Config } from '../../constants/Config';
+import { Config } from '@/constants/Config';
+import api from '@/lib/api';
+import { useAuth } from '@/providers/AuthProvider';
 
-const SCREEN_WIDTH = Dimensions.get('window').width;
+type MotionState = 'Normal' | 'Bump' | 'Accident';
+type Vector3 = { x: number; y: number; z: number };
+type Subscription = { remove: () => void };
+type SensorSubscription = { accel: Subscription; gyro: Subscription };
+type EmergencyContact = { id: string; name: string; phone: string; relation?: string };
+type ApiEmergencyContact = { id: number; name: string; phone_number: string; relation?: string };
+type SensorSequenceItem = { accel_x: number; accel_y: number; accel_z: number; gyro_x: number; gyro_y: number; gyro_z: number };
+type RegionalSummary = { city: string; state: string; trafficDensity: string; congestionLevel: number; yearlyAccidents: number; riskLevel: string };
+type RiskAnalysis = { rawScore: number; smoothedScore: number; band: string; recommendation: string; confidence: number; impactDelta: number; angularVelocity: number; reasons: string[]; motionState: MotionState; readingId: number | null; lastSyncedAt: string };
 
-interface ThreeAxisMeasurement {
-  x: number;
-  y: number;
-  z: number;
-}
+const GRAVITY_MS2 = 9.81;
+const SENSOR_SEQUENCE_LIMIT = 64;
+const RISK_WINDOW = 5;
+const HELPLINES: EmergencyContact[] = [
+  { id: 'police', name: 'Police', phone: '100', relation: 'Emergency' },
+  { id: 'ambulance', name: 'Ambulance', phone: '108', relation: 'Medical' },
+  { id: 'fire', name: 'Fire', phone: '101', relation: 'Emergency' },
+];
+const INITIAL_ANALYSIS: RiskAnalysis = {
+  rawScore: 0,
+  smoothedScore: 0,
+  band: 'low',
+  recommendation: 'Normal monitoring.',
+  confidence: 55,
+  impactDelta: 0,
+  angularVelocity: 0,
+  reasons: [],
+  motionState: 'Normal',
+  readingId: null,
+  lastSyncedAt: 'Not synced yet',
+};
 
-interface Subscription {
-  remove: () => void;
-}
+const mapApiContactToLocal = (contact: ApiEmergencyContact): EmergencyContact => ({
+  id: String(contact.id),
+  name: contact.name,
+  phone: contact.phone_number,
+  relation: contact.relation,
+});
 
-interface SensorSubscription {
-  accel: Subscription;
-  gyro: Subscription;
-}
-
-interface EmergencyContact {
-  id: string;
-  name: string;
-  phone: string;
-  relation?: string;
-}
+const toMs2 = (value: number) => value * GRAVITY_MS2;
+const accelToMs2 = (accel: Vector3) => ({ x: toMs2(accel.x), y: toMs2(accel.y), z: toMs2(accel.z) });
+const magnitude = (vector: Vector3) => Math.sqrt((vector.x * vector.x) + (vector.y * vector.y) + (vector.z * vector.z));
+const impactDelta = (accel: Vector3) => Math.abs(magnitude(accelToMs2(accel)) - GRAVITY_MS2);
+const maxAngularVelocity = (gyro: Vector3) => Math.max(Math.abs(gyro.x), Math.abs(gyro.y), Math.abs(gyro.z));
+const smoothRisk = (samples: number[]) => {
+  if (samples.length === 0) return 0;
+  const weighted = samples.reduce((acc, value, index) => ({ total: acc.total + (value * (index + 1)), weight: acc.weight + index + 1 }), { total: 0, weight: 0 });
+  return weighted.total / weighted.weight;
+};
+const formatBandLabel = (value: string) => value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : 'Low';
+const formatMotion = (value?: string): MotionState => value === 'accident' ? 'Accident' : value === 'bump' ? 'Bump' : 'Normal';
+const toneForRisk = (score: number) => score >= 80 ? { accent: '#FF4D67', soft: '#351019', text: '#FFE7EB' } : score >= 55 ? { accent: '#FF9A3D', soft: '#38210D', text: '#FFF0DF' } : score >= 25 ? { accent: '#F3C64E', soft: '#342A10', text: '#FFF6DB' } : { accent: '#32C48D', soft: '#103126', text: '#E6FFF5' };
+const clockTime = (value: Date) => value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 export default function HomeScreen() {
-  const [accelData, setAccelData] = useState<ThreeAxisMeasurement>({ x: 0, y: 0, z: 0 });
-  const [gyroData, setGyroData] = useState<ThreeAxisMeasurement>({ x: 0, y: 0, z: 0 });
-  const [riskScore, setRiskScore] = useState<number>(0);
-  const [isMonitoring, setIsMonitoring] = useState<boolean>(false);
-  const [subscription, setSubscription] = useState<SensorSubscription | null>(null);
-  const [accelHistoryX, setAccelHistoryX] = useState<number[]>([0, 0, 0, 0, 0, 0]);
-  const [accelHistoryY, setAccelHistoryY] = useState<number[]>([0, 0, 0, 0, 0, 0]);
-  const [accelHistoryZ, setAccelHistoryZ] = useState<number[]>([0, 0, 0, 0, 0, 0]);
-  const [gyroHistoryX, setGyroHistoryX] = useState<number[]>([0, 0, 0, 0, 0, 0]);
-  const [gyroHistoryY, setGyroHistoryY] = useState<number[]>([0, 0, 0, 0, 0, 0]);
-  const [gyroHistoryZ, setGyroHistoryZ] = useState<number[]>([0, 0, 0, 0, 0, 0]);
-  // X‑axis time labels for 30‑second moving window
-  const [timeLabels, setTimeLabels] = useState<string[]>(["", "", "", "", "", ""]);
+  const { profile, token } = useAuth();
+  const [accelData, setAccelData] = useState<Vector3>({ x: 0, y: 0, z: 1 });
+  const [gyroData, setGyroData] = useState<Vector3>({ x: 0, y: 0, z: 0 });
+  const [riskAnalysis, setRiskAnalysis] = useState<RiskAnalysis>(INITIAL_ANALYSIS);
+  const [isMonitoring, setIsMonitoring] = useState(false);
+  const [sensorSubscription, setSensorSubscription] = useState<SensorSubscription | null>(null);
+  const [locationWatcher, setLocationWatcher] = useState<Location.LocationSubscription | null>(null);
+  const [location, setLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [locationLabel, setLocationLabel] = useState('Waiting for GPS');
+  const [speedKmph, setSpeedKmph] = useState(0);
+  const [regionalSummary, setRegionalSummary] = useState<RegionalSummary>({ city: 'Unknown', state: 'Unknown', trafficDensity: 'Unknown', congestionLevel: 0, yearlyAccidents: 0, riskLevel: 'Unknown' });
   const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([]);
   const [predefinedNumbers, setPredefinedNumbers] = useState<string[]>(Config.DEFAULT_EMERGENCY_NUMBERS?.length ? [...Config.DEFAULT_EMERGENCY_NUMBERS] : []);
-  const [newPredefinedNumber, setNewPredefinedNumber] = useState<string>('');
+  const [newPredefinedNumber, setNewPredefinedNumber] = useState('');
   const [systemLogs, setSystemLogs] = useState<string[]>([]);
   const [tripStartTime, setTripStartTime] = useState<Date | null>(null);
-  const [tripDuration, setTripDuration] = useState<string>('0:00');
+  const [tripDuration, setTripDuration] = useState('0:00');
+  const [lastAlertTime, setLastAlertTime] = useState('Never');
+  const [isAccidentDialogVisible, setIsAccidentDialogVisible] = useState(false);
+  const [accidentCountdown, setAccidentCountdown] = useState(10);
 
-  // Location and live metrics
-  const [location, setLocation] = useState<{ latitude: number, longitude: number } | null>(null);
-  const [locationName, setLocationName] = useState<string>('Fetching...');
-  const [speed, setSpeed] = useState<number>(0);
-  const [nearbyRoads, setNearbyRoads] = useState<string[]>([]);
-  const [majorHighways, setMajorHighways] = useState<string[]>([]);
-  const [estimatedCongestion, setEstimatedCongestion] = useState<number>(0);
-  const [weather, setWeather] = useState<string>('Loading...');
-  const [temperature, setTemperature] = useState<number>(0);
-  const [trafficDensity, setTrafficDensity] = useState<string>('Unknown');
-  const [accidentHistory, setAccidentHistory] = useState<string>('Loading...');
-  const [riskLevel, setRiskLevel] = useState<string>('Unknown');
-  const [lastAlertTime, setLastAlertTime] = useState<string>('None');
-  const [confidenceScore, setConfidenceScore] = useState<number>(98);
-
-  const [motionState, setMotionState] = useState<'Normal' | 'Bump' | 'Accident'>('Normal');
-  const [isAccidentDialogVisible, setIsAccidentDialogVisible] = useState<boolean>(false);
-  const [accidentCountdown, setAccidentCountdown] = useState<number>(10);
+  const accelRef = useRef(accelData);
+  const gyroRef = useRef(gyroData);
+  const locationRef = useRef(location);
+  const speedRef = useRef(speedKmph);
+  const trafficRef = useRef(regionalSummary.trafficDensity);
+  const regionRef = useRef(regionalSummary.riskLevel);
+  const riskSamplesRef = useRef<number[]>([]);
+  const sensorSequenceRef = useRef<SensorSequenceItem[]>([]);
   const accidentTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
+  const lastRegionalFetchRef = useRef(0);
 
-  // Animation for risk indicator
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const liveAccel = accelToMs2(accelData);
+  const currentImpact = riskAnalysis.impactDelta || impactDelta(accelData);
+  const currentAngularVelocity = riskAnalysis.angularVelocity || maxAngularVelocity(gyroData);
+  const riskTone = toneForRisk(riskAnalysis.smoothedScore);
 
-  // Helpline contacts (fallback)
-  const helplineContacts: EmergencyContact[] = [
-    { id: 'helpline-1', name: 'Police', phone: '100', relation: 'Emergency' },
-    { id: 'helpline-2', name: 'Ambulance', phone: '108', relation: 'Medical' },
-    { id: 'helpline-3', name: 'Fire', phone: '101', relation: 'Emergency' },
-  ];
-
-  const addPredefinedNumber = () => {
-    const trimmed = newPredefinedNumber.trim().replace(/\s/g, '');
-    if (!trimmed) return;
-    if (predefinedNumbers.includes(trimmed)) {
-      addLog('Number already in list');
-      return;
-    }
-    setPredefinedNumbers(prev => [...prev, trimmed]);
-    setNewPredefinedNumber('');
-    addLog(`Added SOS number: ${trimmed}`);
+  const addLog = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    setSystemLogs((prev) => [`[${timestamp}] ${message}`, ...prev.slice(0, 5)]);
   };
 
-  const removePredefinedNumber = (number: string) => {
-    setPredefinedNumbers(prev => prev.filter(n => n !== number));
-    addLog(`Removed SOS number: ${number}`);
+  const loadEmergencyContacts = async () => {
+    if (!token) {
+      setEmergencyContacts([]);
+      return;
+    }
+    try {
+      const response = await api.get(Config.CONTACTS_URL);
+      const contacts = Array.isArray(response.data?.contacts) ? response.data.contacts : [];
+      setEmergencyContacts(contacts.map(mapApiContactToLocal));
+    } catch {
+      addLog('Could not sync contacts from backend');
+    }
+  };
+
+  const saveEmergencyContact = async (contact: Omit<EmergencyContact, 'id'>) => {
+    try {
+      const response = await api.post(Config.CONTACTS_URL, {
+        name: contact.name,
+        phone_number: contact.phone.replace(/\s/g, ''),
+        relation: contact.relation || 'Emergency Contact',
+        is_primary: emergencyContacts.length === 0,
+      });
+      const savedContact = mapApiContactToLocal(response.data.contact);
+      setEmergencyContacts((prev) => [...prev.filter((item) => item.phone !== savedContact.phone), savedContact]);
+      addLog(`Saved emergency contact: ${savedContact.name}`);
+    } catch (error: any) {
+      const message = error?.response?.data?.message || 'Could not save contact.';
+      addLog(message);
+      Alert.alert('Contact Save Failed', message);
+    }
   };
 
   const pickContact = async () => {
     const { status } = await Contacts.requestPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission Denied', 'Cannot access contacts without permission');
+      Alert.alert('Permission Denied', 'Cannot access contacts without permission.');
       return;
     }
+    const { data } = await Contacts.getContactsAsync({ fields: [Contacts.Fields.PhoneNumbers] });
+    const options = data.filter((contact) => contact.phoneNumbers?.[0]?.number).slice(0, 8).map((contact) => ({
+      text: contact.name || 'Unknown',
+      onPress: () => saveEmergencyContact({
+        name: contact.name || 'Unknown',
+        phone: contact.phoneNumbers?.[0]?.number || '',
+        relation: 'Emergency Contact',
+      }),
+    }));
+    if (options.length === 0) {
+      Alert.alert('No Contacts', 'No contacts with phone numbers were found.');
+      return;
+    }
+    Alert.alert('Select Emergency Contact', 'Choose a contact from your phone.', options);
+  };
 
-    const { data } = await Contacts.getContactsAsync({
-      fields: [Contacts.Fields.PhoneNumbers],
-    });
+  const addPredefinedNumber = () => {
+    const trimmed = newPredefinedNumber.trim().replace(/\s/g, '');
+    if (!trimmed) return;
+    if (predefinedNumbers.includes(trimmed)) {
+      addLog('Number already added');
+      return;
+    }
+    setPredefinedNumbers((prev) => [...prev, trimmed]);
+    setNewPredefinedNumber('');
+    addLog(`Added SOS number: ${trimmed}`);
+  };
 
-    if (data.length > 0) {
-      // Show contact picker
-      const contactNames = data.map((c, i) => ({
-        text: c.name || 'Unknown',
-        onPress: () => {
-          const phone = c.phoneNumbers?.[0]?.number || 'No phone';
-          const newContact: EmergencyContact = {
-            id: c.id || String(Date.now()),
-            name: c.name || 'Unknown',
-            phone: phone,
-            relation: 'Emergency Contact',
-          };
-          setEmergencyContacts(prev => [...prev, newContact]);
-        },
-      }));
+  const removePredefinedNumber = (phone: string) => {
+    setPredefinedNumbers((prev) => prev.filter((item) => item !== phone));
+    addLog(`Removed SOS number: ${phone}`);
+  };
 
-      Alert.alert(
-        'Select Emergency Contact',
-        'Choose a contact from your list',
-        contactNames.slice(0, 10) // Limit to 10 for UI
-      );
+  const fetchRegionalSummary = async (latitude: number, longitude: number) => {
+    try {
+      const response = await api.get(Config.REGIONAL_DATA_URL, { params: { lat: latitude, lon: longitude } });
+      const data = response.data || {};
+      setRegionalSummary({
+        city: data.city || 'Unknown',
+        state: data.state || 'Unknown',
+        trafficDensity: data.traffic?.density || 'Unknown',
+        congestionLevel: Number(data.traffic?.congestion_level || 0),
+        yearlyAccidents: Number(data.accident_history?.yearly_accidents || 0),
+        riskLevel: data.accident_history?.risk_level || 'Unknown',
+      });
+      setLocationLabel(data.city && data.city !== 'Unknown' ? `${data.city}, ${data.state}` : 'GPS active');
+    } catch {
+      setLocationLabel('GPS active');
     }
   };
 
-  // Helper function to add system logs
-  const addLog = (message: string) => {
-    const timestamp = new Date().toLocaleTimeString();
-    setSystemLogs(prev => [`[${timestamp}] ${message}`, ...prev.slice(0, 4)]);
-  };
-
-  const classifyMotionFromRisk = (score: number): 'Normal' | 'Bump' | 'Accident' => {
-    if (score >= 70) return 'Accident';
-    if (score >= 30) return 'Bump';
-    return 'Normal';
-  };
-
-  const classifyMotionFromSensors = (accel: ThreeAxisMeasurement): 'Normal' | 'Bump' | 'Accident' => {
-    // Calculate magnitude excluding baseline gravity if possible (naive approach)
-    // For a phone at rest, magnitude is ~1.0 G
-    const magnitude = Math.sqrt(
-      accel.x * accel.x +
-      accel.y * accel.y +
-      accel.z * accel.z
-    );
-
-    // Increase thresholds significantly:
-    // 4.0 G impact for accident, 2.5 G for significant bump
-    if (magnitude >= 4.0) return 'Accident';
-    if (magnitude >= 2.5) return 'Bump';
-    return 'Normal';
+  const pushSensorSample = (accel: Vector3, gyro: Vector3) => {
+    const converted = accelToMs2(accel);
+    sensorSequenceRef.current = [
+      ...sensorSequenceRef.current.slice(-(SENSOR_SEQUENCE_LIMIT - 1)),
+      {
+        accel_x: Number(converted.x.toFixed(3)),
+        accel_y: Number(converted.y.toFixed(3)),
+        accel_z: Number(converted.z.toFixed(3)),
+        gyro_x: Number(gyro.x.toFixed(3)),
+        gyro_y: Number(gyro.y.toFixed(3)),
+        gyro_z: Number(gyro.z.toFixed(3)),
+      },
+    ];
   };
 
   const clearAccidentTimer = () => {
@@ -178,1228 +225,439 @@ export default function HomeScreen() {
   const loadAlarmSound = async () => {
     try {
       if (soundRef.current) return;
-
-      // Request audio permissions and set mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        staysActiveInBackground: true,
-        playThroughEarpieceAndroid: false,
-      });
-
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3' },
-        { shouldPlay: false, isLooping: true, volume: 1.0 }
-      );
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true, shouldDuckAndroid: true, playThroughEarpieceAndroid: false });
+      const { sound } = await Audio.Sound.createAsync({ uri: 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3' }, { shouldPlay: false, isLooping: true, volume: 1 });
       soundRef.current = sound;
-      addLog('Alarm sound loaded');
     } catch (error) {
-      console.error('Error loading sound:', error);
-      addLog(`Sound load error: ${error instanceof Error ? error.message : String(error)}`);
+      addLog(`Alarm sound unavailable: ${String(error)}`);
     }
   };
 
   const playAlarmSound = async () => {
     try {
-      if (!soundRef.current) {
-        await loadAlarmSound();
-      }
-      if (soundRef.current) {
-        await soundRef.current.replayAsync();
-      }
-    } catch (error) {
-      console.error('Error playing sound:', error);
+      if (!soundRef.current) await loadAlarmSound();
+      if (soundRef.current) await soundRef.current.replayAsync();
+    } catch {
+      addLog('Alarm playback failed');
     }
   };
 
   const stopAlarmSound = async () => {
     try {
-      if (soundRef.current) {
-        await soundRef.current.stopAsync();
-      }
-    } catch (error) {
-      console.error('Error stopping sound:', error);
+      if (soundRef.current) await soundRef.current.stopAsync();
+    } catch {
+      // Ignore alarm stop failures during cleanup.
     }
   };
 
-  const triggerSOS = () => {
-    clearAccidentTimer();
-    Vibration.cancel();
-    stopAlarmSound();
-    setIsAccidentDialogVisible(false);
-    setAccidentCountdown(10);
-    addLog('Accident confirmed - sending SOS');
-    sendSMSAlert();
-  };
-
-  const cancelAccidentFlow = () => {
-    clearAccidentTimer();
-    Vibration.cancel();
-    stopAlarmSound();
-    setIsAccidentDialogVisible(false);
-    setAccidentCountdown(10);
-    addLog('Accident alert cancelled by user');
-  };
-
-  const startAccidentFlow = () => {
-    if (isAccidentDialogVisible) {
+  const sendSMSAlert = async (triggerSource: 'automatic' | 'manual') => {
+    const backendContacts = emergencyContacts.map((contact) => contact.phone);
+    const allNumbers = [...new Set([...predefinedNumbers, ...backendContacts])].filter(Boolean);
+    if (allNumbers.length === 0 && !token) {
+      addLog('No emergency contacts available for SOS');
+      Alert.alert('No Contacts', 'Add at least one emergency contact before sending SOS.');
       return;
     }
+    try {
+      const response = await api.post(Config.SMS_ALERT_URL, {
+        phone_numbers: allNumbers,
+        risk_score: Math.round(riskAnalysis.smoothedScore),
+        latitude: locationRef.current?.latitude,
+        longitude: locationRef.current?.longitude,
+        reading_id: riskAnalysis.readingId,
+        sender_name: profile?.emergency_message_name || profile?.full_name || profile?.username || 'REFLEX User',
+        motion_state: riskAnalysis.motionState.toLowerCase(),
+        risk_band: riskAnalysis.band,
+        trigger_source: triggerSource,
+      });
+      const message = response.data?.message || 'SOS sent successfully.';
+      setLastAlertTime(clockTime(new Date()));
+      addLog(message);
+      Alert.alert('SOS Sent', response.data?.message_body || message);
+    } catch (error: any) {
+      const message = error?.response?.data?.message || 'Network or backend error while sending SOS.';
+      addLog(`SOS failed: ${message}`);
+      Alert.alert('SOS Failed', message);
+    }
+  };
+
+  const triggerSOS = async () => {
+    clearAccidentTimer();
+    Vibration.cancel();
+    await stopAlarmSound();
+    setIsAccidentDialogVisible(false);
+    setAccidentCountdown(10);
+    addLog('Accident confirmed. Sending SOS.');
+    await sendSMSAlert('automatic');
+  };
+
+  const cancelAccidentFlow = async () => {
+    clearAccidentTimer();
+    Vibration.cancel();
+    await stopAlarmSound();
+    setIsAccidentDialogVisible(false);
+    setAccidentCountdown(10);
+    addLog('Accident alert canceled by user');
+  };
+
+  const startAccidentFlow = async () => {
+    if (isAccidentDialogVisible) return;
     setIsAccidentDialogVisible(true);
     setAccidentCountdown(10);
-
-    // Alert feedback
     Vibration.vibrate([0, 500, 500], true);
-    playAlarmSound();
+    await playAlarmSound();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-
-    const timer = setInterval(() => {
-      setAccidentCountdown(prev => {
+    accidentTimerRef.current = setInterval(() => {
+      setAccidentCountdown((prev) => {
         if (prev <= 1) {
-          triggerSOS();
+          void triggerSOS();
           return 0;
         }
-        // Continuous haptic feedback every second
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         return prev - 1;
       });
     }, 1000);
-
-    accidentTimerRef.current = timer;
   };
 
-  // Send SMS alerts to predefined numbers + emergency contacts
-  const sendSMSAlert = async () => {
-    const fromContacts = emergencyContacts.map(c => c.phone);
-    const allNumbers = [...new Set([...predefinedNumbers, ...fromContacts])].filter(Boolean);
-    if (allNumbers.length === 0) {
-      addLog('No emergency contacts or predefined numbers to alert');
-      return;
-    }
-
-    try {
-      const resp = await axios.post(Config.SMS_ALERT_URL, {
-        phone_numbers: allNumbers,
-        risk_score: riskScore,
-        latitude: location?.latitude || 28.6139,
-        longitude: location?.longitude || 77.2090
-      });
-      const message = resp?.data?.message ? String(resp.data.message) : `SOS request sent to ${allNumbers.length} number(s)`;
-      addLog(message);
-      if (resp?.data?.results) {
-        const results = resp.data.results as any[];
-        const failed = Array.isArray(results) ? results.filter(r => r && r.success === false) : [];
-        if (failed.length > 0) {
-          addLog(`Some SMS failed: ${failed.length}/${results.length}`);
-        }
-      }
-      Alert.alert('SOS', message);
-    } catch (error: any) {
-      const backendMsg = error?.response?.data?.message;
-      addLog(backendMsg ? `SOS failed: ${backendMsg}` : 'Failed to send SOS (network/backend error)');
-      console.error('SMS error:', error?.response?.data || error);
-      Alert.alert('SOS Failed', backendMsg || 'Network or backend error while sending SOS');
-    }
-  };
-
-  // Fetch location name from OpenStreetMap (Nominatim)
-  const fetchLocationName = async (lat: number, lon: number) => {
-    try {
-      const response = await axios.get(
-        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`
-      );
-      const address = response.data.address;
-      const city = address.city || address.town || address.village || 'Unknown';
-      const state = address.state || '';
-      setLocationName(`${city}, ${state}`);
-    } catch (error) {
-      setLocationName('Location unavailable');
-      console.error('Geocoding error:', error);
-    }
-  };
-
-  // Fetch weather from Open-Meteo (free, no API key needed)
-  const fetchWeather = async (lat: number, lon: number) => {
-    try {
-      const response = await axios.get(
-        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`
-      );
-      const current = response.data.current_weather;
-      setTemperature(Math.round(current.temperature));
-
-      // Weather code to description mapping
-      const weatherCodes: { [key: number]: string } = {
-        0: 'Clear', 1: 'Mainly Clear', 2: 'Partly Cloudy', 3: 'Overcast',
-        45: 'Foggy', 48: 'Foggy', 51: 'Drizzle', 61: 'Rain', 80: 'Rain Showers'
-      };
-      setWeather(weatherCodes[current.weathercode] || 'Clear');
-    } catch (error) {
-      setWeather('Unavailable');
-      console.error('Weather error:', error);
-    }
-  };
-
-  // Fetch regional traffic and accident data
-  const fetchRegionalData = async (lat: number, lon: number) => {
-    try {
-      const response = await axios.get(
-        `${Config.REGIONAL_DATA_URL}?lat=${lat}&lon=${lon}`
-      );
-      const data = response.data;
-
-      setTrafficDensity(data.traffic.density);
-      setAccidentHistory(`${data.accident_history.yearly_accidents} accidents/year`);
-      setRiskLevel(data.accident_history.risk_level);
-
-      addLog(`Region: ${data.city}, ${data.state} - ${data.accident_history.risk_level} risk`);
-    } catch (error) {
-      setTrafficDensity('Unknown');
-      setAccidentHistory('Data unavailable');
-      console.error('Regional data error:', error);
-    }
-  };
-
-  // Fetch real‑time traffic data from Overpass API
-  const fetchTrafficData = async (lat: number, lon: number) => {
-    try {
-      const response = await axios.get(
-        `${Config.TRAFFIC_DATA_URL}?lat=${lat}&lon=${lon}`
-      );
-      const data = response.data;
-      setTrafficDensity(data.traffic_density || data.traffic?.density || 'Unknown');
-      setNearbyRoads(data.nearby_roads || []);
-      setMajorHighways(data.major_highways || []);
-      setEstimatedCongestion(data.estimated_congestion || data.congestion || 0);
-      addLog(`Traffic fetched: ${data.traffic_density || data.traffic?.density}`);
-    } catch (error) {
-      console.error('Traffic API error:', error);
-    }
-  };
-  // Start location tracking
   const startLocationTracking = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') {
       addLog('Location permission denied');
       return;
     }
-
-    addLog('Location tracking started');
-
-    // Watch position with high accuracy
-    Location.watchPositionAsync(
-      {
-        accuracy: Location.Accuracy.High,
-        timeInterval: 2000,
-        distanceInterval: 10,
-      },
-      (loc) => {
-        const { latitude, longitude, speed: gpsSpeed } = loc.coords;
-        setLocation({ latitude, longitude });
-        setSpeed(gpsSpeed ? Math.round(gpsSpeed * 3.6) : 0); // m/s to km/h
-
-        // For the core accident/SOS demo we skip external
-        // geocoding / weather / traffic APIs to avoid 403/404
-        // errors and focus on motion + SOS.
+    const watcher = await Location.watchPositionAsync({ accuracy: Location.Accuracy.High, timeInterval: 3000, distanceInterval: 15 }, (currentLocation) => {
+      const nextLocation = { latitude: currentLocation.coords.latitude, longitude: currentLocation.coords.longitude };
+      const nextSpeed = Math.max(0, Math.round((currentLocation.coords.speed || 0) * 3.6));
+      setLocation(nextLocation);
+      locationRef.current = nextLocation;
+      setSpeedKmph(nextSpeed);
+      speedRef.current = nextSpeed;
+      const now = Date.now();
+      if (now - lastRegionalFetchRef.current > 15000) {
+        lastRegionalFetchRef.current = now;
+        void fetchRegionalSummary(nextLocation.latitude, nextLocation.longitude);
       }
-    );
+    });
+    setLocationWatcher(watcher);
+    addLog('Location tracking started');
   };
 
-  // Pulse animation for high risk
-  useEffect(() => {
-    if (riskScore > 50) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.1,
-            duration: 500,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 500,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    } else {
-      pulseAnim.setValue(1);
+  const stopLocationTracking = () => {
+    if (locationWatcher) {
+      locationWatcher.remove();
+      setLocationWatcher(null);
     }
-  }, [riskScore]);
+  };
 
-  // Update trip duration
+  const sendDataToBackend = async () => {
+    try {
+      const now = new Date();
+      const accel = accelToMs2(accelRef.current);
+      const gyro = gyroRef.current;
+      const payload: Record<string, unknown> = {
+        accel_x: accel.x,
+        accel_y: accel.y,
+        accel_z: accel.z,
+        gyro_x: gyro.x,
+        gyro_y: gyro.y,
+        gyro_z: gyro.z,
+        speed_kmph: speedRef.current,
+        latitude: locationRef.current?.latitude,
+        longitude: locationRef.current?.longitude,
+        weather: 'Clear',
+        traffic: trafficRef.current === 'Unknown' ? 'Moderate' : trafficRef.current,
+        region_type: regionRef.current === 'Unknown' ? 'Urban' : regionRef.current,
+        road_class: 'Urban',
+        weekday: now.toLocaleDateString('en-US', { weekday: 'short' }),
+        time: now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }),
+      };
+      if (sensorSequenceRef.current.length === SENSOR_SEQUENCE_LIMIT) payload.sensor_sequence = sensorSequenceRef.current;
+      const response = await api.post(Config.SENSORS_DATA_URL, payload);
+      if (typeof response.data?.accident_rate !== 'number') return;
+      const rawScore = response.data.accident_rate;
+      const samples = [...riskSamplesRef.current, rawScore].slice(-RISK_WINDOW);
+      riskSamplesRef.current = samples;
+      const smoothedScore = smoothRisk(samples);
+      const motionState = formatMotion(response.data?.motion_state);
+      const reasons = Array.isArray(response.data?.trigger_reasons) ? response.data.trigger_reasons : [];
+      setRiskAnalysis({
+        rawScore,
+        smoothedScore,
+        band: response.data?.risk_band || 'low',
+        recommendation: response.data?.recommended_action || 'Normal monitoring.',
+        confidence: Number(response.data?.confidence_score || 55),
+        impactDelta: Number(response.data?.impact_delta || impactDelta(accelRef.current)),
+        angularVelocity: Number(response.data?.max_angular_velocity || maxAngularVelocity(gyroRef.current)),
+        reasons,
+        motionState,
+        readingId: response.data?.reading_id ?? null,
+        lastSyncedAt: clockTime(new Date()),
+      });
+      if (smoothedScore >= 55) addLog(`Risk ${Math.round(smoothedScore)}%: ${reasons.join(', ') || 'High-risk reading detected'}`);
+      if (motionState === 'Accident' || smoothedScore >= 80) void startAccidentFlow();
+    } catch {
+      addLog('Backend sync failed');
+    }
+  };
+
+  const startMonitoring = async () => {
+    if (Platform.OS === 'web') {
+      Alert.alert('Unavailable', 'Live sensor monitoring is only available on a mobile device.');
+      return;
+    }
+    const accelAvailable = await Accelerometer.isAvailableAsync();
+    const gyroAvailable = await Gyroscope.isAvailableAsync();
+    if (!accelAvailable || !gyroAvailable) {
+      Alert.alert('Sensors Unavailable', 'This device does not expose the required sensors.');
+      return;
+    }
+    setIsMonitoring(true);
+    setTripStartTime(new Date());
+    setRiskAnalysis(INITIAL_ANALYSIS);
+    riskSamplesRef.current = [];
+    sensorSequenceRef.current = [];
+    addLog('Trip monitoring started');
+    await startLocationTracking();
+    Accelerometer.setUpdateInterval(250);
+    Gyroscope.setUpdateInterval(250);
+    const accelSub = Accelerometer.addListener((data) => {
+      accelRef.current = data;
+      setAccelData(data);
+      pushSensorSample(data, gyroRef.current);
+    });
+    const gyroSub = Gyroscope.addListener((data) => {
+      gyroRef.current = data;
+      setGyroData(data);
+      pushSensorSample(accelRef.current, data);
+    });
+    setSensorSubscription({ accel: accelSub, gyro: gyroSub });
+  };
+
+  const stopMonitoring = async () => {
+    setIsMonitoring(false);
+    setTripStartTime(null);
+    setTripDuration('0:00');
+    sensorSubscription?.accel.remove();
+    sensorSubscription?.gyro.remove();
+    setSensorSubscription(null);
+    stopLocationTracking();
+    await cancelAccidentFlow();
+    addLog('Trip monitoring stopped');
+  };
+
+  useEffect(() => { accelRef.current = accelData; }, [accelData]);
+  useEffect(() => { gyroRef.current = gyroData; }, [gyroData]);
+  useEffect(() => { locationRef.current = location; }, [location]);
+  useEffect(() => { speedRef.current = speedKmph; }, [speedKmph]);
+  useEffect(() => { trafficRef.current = regionalSummary.trafficDensity; regionRef.current = regionalSummary.riskLevel; }, [regionalSummary]);
+  useEffect(() => { void loadEmergencyContacts(); }, [token]);
   useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
+    void loadAlarmSound();
+    return () => {
+      void stopMonitoring();
+      if (soundRef.current) void soundRef.current.unloadAsync();
+    };
+  }, []);
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | undefined;
+    if (isMonitoring) interval = setInterval(() => void sendDataToBackend(), 1200);
+    return () => { if (interval) clearInterval(interval); };
+  }, [isMonitoring]);
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | undefined;
     if (isMonitoring && tripStartTime) {
       interval = setInterval(() => {
-        const now = new Date();
-        const diff = Math.floor((now.getTime() - tripStartTime.getTime()) / 1000);
-        const minutes = Math.floor(diff / 60);
-        const seconds = diff % 60;
+        const diffSeconds = Math.floor((Date.now() - tripStartTime.getTime()) / 1000);
+        const minutes = Math.floor(diffSeconds / 60);
+        const seconds = diffSeconds % 60;
         setTripDuration(`${minutes}:${seconds.toString().padStart(2, '0')}`);
       }, 1000);
     }
-    return () => clearInterval(interval);
+    return () => { if (interval) clearInterval(interval); };
   }, [isMonitoring, tripStartTime]);
 
-  const _subscribe = async () => {
-    if (Platform.OS === 'web') return;
-
-    const isAccelAvailable = await Accelerometer.isAvailableAsync();
-    const isGyroAvailable = await Gyroscope.isAvailableAsync();
-
-    if (!isAccelAvailable || !isGyroAvailable) {
-      alert('Sensors not available');
-      return;
-    }
-
-    setIsMonitoring(true);
-    setTripStartTime(new Date());
-    addLog('Trip monitoring started');
-    startLocationTracking(); // Start GPS tracking
-    Accelerometer.setUpdateInterval(200);
-    Gyroscope.setUpdateInterval(200);
-
-    const accelSub = Accelerometer.addListener((data: ThreeAxisMeasurement) => {
-      setAccelData(data);
-      setAccelHistoryX(prev => [...prev.slice(1), data.x]);
-      setAccelHistoryY(prev => [...prev.slice(1), data.y]);
-      setAccelHistoryZ(prev => [...prev.slice(1), data.z]);
-    });
-
-    const gyroSub = Gyroscope.addListener((data: ThreeAxisMeasurement) => {
-      setGyroData(data);
-      setGyroHistoryX(prev => [...prev.slice(1), data.x]);
-      setGyroHistoryY(prev => [...prev.slice(1), data.y]);
-      setGyroHistoryZ(prev => [...prev.slice(1), data.z]);
-    });
-
-    setSubscription({ accel: accelSub, gyro: gyroSub });
-  };
-
-  const _unsubscribe = () => {
-    setIsMonitoring(false);
-    setTripStartTime(null);
-    addLog('Trip monitoring stopped');
-    subscription?.accel && subscription.accel.remove();
-    subscription?.gyro && subscription.gyro.remove();
-    setSubscription(null);
-  };
-
-  useEffect(() => {
-    let interval: any;
-    if (isMonitoring) {
-      interval = setInterval(() => {
-        sendDataToBackend(accelData, gyroData);
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [isMonitoring, accelData, gyroData]);
-
-  // Update X‑axis time labels every 3 seconds to reflect real time
-  useEffect(() => {
-    if (isMonitoring) {
-      const updateLabels = () => {
-        const now = new Date();
-        const label = now.toLocaleTimeString('en-GB', { hour12: false }); // HH:MM:SS
-        setTimeLabels(prev => {
-          const newLabels = [...prev.slice(1), label];
-          return newLabels;
-        });
-      };
-      updateLabels(); // initial
-      const labelInterval = setInterval(updateLabels, 3000);
-      return () => clearInterval(labelInterval);
-    }
-  }, [isMonitoring]);
-
-  // Emergency Alert Logic
-  useEffect(() => {
-    if (!isMonitoring) {
-      setMotionState('Normal');
-      return;
-    }
-
-    const sensorState = classifyMotionFromSensors(accelData);
-    const riskState = classifyMotionFromRisk(riskScore);
-
-    let finalState: 'Normal' | 'Bump' | 'Accident' = 'Normal';
-
-    if (sensorState === 'Accident' || riskState === 'Accident') {
-      finalState = 'Accident';
-    } else if (sensorState === 'Bump' || riskState === 'Bump') {
-      finalState = 'Bump';
-    }
-
-    setMotionState(finalState);
-
-    if (finalState === 'Accident') {
-      startAccidentFlow();
-    }
-  }, [accelData, riskScore, isMonitoring]);
-
-  const sendDataToBackend = async (accel: ThreeAxisMeasurement, gyro: ThreeAxisMeasurement) => {
-    try {
-      const payload = {
-        accel_x: accel.x, accel_y: accel.y, accel_z: accel.z,
-        gyro_x: gyro.x, gyro_y: gyro.y, gyro_z: gyro.z,
-      };
-      const response = await axios.post(Config.SENSORS_DATA_URL, payload);
-      if (response.data && response.data.accident_rate) {
-        setRiskScore(response.data.accident_rate);
-      }
-    } catch (error: any) {
-      // console.log('Error sending data:', error);
-    }
-  };
-
-  useEffect(() => {
-    loadAlarmSound();
-    return () => {
-      _unsubscribe();
-      clearAccidentTimer();
-      Vibration.cancel();
-      if (soundRef.current) {
-        soundRef.current.unloadAsync();
-      }
-    };
-  }, []);
-
-  // --- UI Components ---
-
-  const MetricCard = ({ icon, title, value, subValue, color }: any) => (
-    <View style={styles.metricCard}>
-      <View style={[styles.iconContainer, { backgroundColor: color + '20' }]}>
-        <MaterialCommunityIcons name={icon} size={24} color={color} />
-      </View>
-      <View>
-        <Text style={styles.metricTitle}>{title}</Text>
-        <Text style={styles.metricValue}>{value}</Text>
-        {subValue && <Text style={styles.metricSubValue}>{subValue}</Text>}
-      </View>
-    </View>
-  );
-
-  const ContactCard = ({ name, relation, phone, color }: any) => (
-    <View style={styles.contactCard}>
-      <View style={[styles.contactAvatar, { backgroundColor: color }]}>
-        <Text style={styles.avatarText}>{name.charAt(0)}</Text>
-      </View>
-      <View>
-        <Text style={styles.contactName}>{name}</Text>
-        <Text style={styles.contactRelation}>{relation}</Text>
-        <Text style={styles.contactPhone}>{phone}</Text>
-      </View>
-    </View>
-  );
-
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Header */}
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
-          <View style={styles.logoContainer}>
-            <View style={styles.logoBox}>
-              <Text style={styles.logoText}>R</Text>
-            </View>
+          <View>
+            <Text style={styles.eyebrow}>Road safety monitor</Text>
+            <Text style={styles.title}>REFLEX</Text>
+            <Text style={styles.subtitle}>{profile?.full_name ? `Protecting ${profile.full_name}` : 'Protecting every trip'}</Text>
+          </View>
+          <View style={[styles.statusPill, { backgroundColor: isMonitoring ? '#103126' : '#1C2431' }]}>
+            <View style={[styles.statusDot, { backgroundColor: isMonitoring ? '#32C48D' : '#8F9BA8' }]} />
+            <Text style={styles.statusText}>{isMonitoring ? 'Monitoring' : 'Idle'}</Text>
+          </View>
+        </View>
+
+        <LinearGradient colors={[riskTone.soft, '#0F1722']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.heroCard, { borderColor: `${riskTone.accent}40` }]}>
+          <View style={styles.heroRow}>
             <View>
-              <Text style={styles.appName}>REFLEX</Text>
-              <Text style={styles.appTagline}>SMART VEHICLE SAFETY MONITOR</Text>
+              <Text style={styles.heroLabel}>Current risk</Text>
+              <Text style={[styles.heroValue, { color: riskTone.text }]}>{Math.round(riskAnalysis.smoothedScore)}%</Text>
+            </View>
+            <View style={[styles.heroBadge, { backgroundColor: riskTone.accent }]}>
+              <Text style={styles.heroBadgeText}>{formatBandLabel(riskAnalysis.band)}</Text>
             </View>
           </View>
-          <TouchableOpacity style={styles.emergencyBtn}>
-            <View style={styles.emergencyDot} />
-            <Text style={styles.emergencyText}>Emergency Alert</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Main Dashboard Grid */}
-        <View style={styles.gridContainer}>
-
-          {/* Left Column: Safety Monitor */}
-          <View style={styles.leftColumn}>
-            <View style={styles.safetyCard}>
-              {/* Background System Log */}
-              <View style={styles.logBackgroundContainer} pointerEvents="none">
-                {systemLogs.slice().reverse().map((log, index) => (
-                  <Text key={index} style={styles.logBackgroundText}>
-                    {`> ${log}`}
-                  </Text>
-                ))}
-                {systemLogs.length === 0 && (
-                  <Text style={styles.logBackgroundText}>{"> System Ready..."}</Text>
-                )}
-              </View>
-
-              <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="shield-check" size={20} color="#00E5FF" />
-                <Text style={styles.cardTitle}>Safety Monitor</Text>
-              </View>
-
-              <View style={styles.riskCircleContainer}>
-                <TouchableOpacity onPress={isMonitoring ? _unsubscribe : _subscribe} style={{ alignItems: 'center' }}>
-                  <Animated.View style={[
-                    styles.riskCircle,
-                    {
-                      borderColor: isMonitoring ? (riskScore > 50 ? '#FF3B30' : '#34C759') : '#00E5FF',
-                      transform: [{ scale: pulseAnim }]
-                    }
-                  ]}>
-                    {isMonitoring ? (
-                      <>
-                        <Text style={[styles.riskValue, { color: riskScore > 50 ? '#FF3B30' : '#34C759' }]}>
-                          {Math.round(riskScore)}%
-                        </Text>
-                        <Text style={[styles.riskLabel, { color: riskScore > 50 ? '#FF3B30' : '#34C759' }]}>
-                          {riskScore > 50 ? 'CRITICAL' : 'SAFE'}
-                        </Text>
-                      </>
-                    ) : (
-                      <Text style={[styles.riskValue, { color: '#00E5FF', fontSize: 32 }]}>START</Text>
-                    )}
-                  </Animated.View>
-                </TouchableOpacity>
-              </View>
-
-              {isMonitoring && (
-                <Text style={styles.motionStateText}>
-                  MOTION: {motionState.toUpperCase()}
-                </Text>
-              )}
-
-              {isMonitoring && (
-                <View style={styles.safetyStatsRow}>
-                  <View style={styles.safetyStat}>
-                    <Text style={styles.statValue}>98%</Text>
-                    <Text style={styles.statLabel}>CONFIDENCE</Text>
-                  </View>
-                  <View style={styles.safetyStat}>
-                    <Text style={[styles.statValue, { color: '#00E5FF' }]}>None</Text>
-                    <Text style={styles.statLabel}>LAST ALERT</Text>
-                  </View>
-                  <View style={styles.safetyStat}>
-                    <Text style={[styles.statValue, { color: '#FFD60A' }]}>{tripDuration}</Text>
-                    <Text style={styles.statLabel}>TRIP TIME</Text>
-                  </View>
-                </View>
-              )}
-
-              <TouchableOpacity
-                style={[styles.testSoundBtn, { marginTop: 10 }]}
-                onPress={async () => {
-                  try {
-                    addLog('Testing sound...');
-                    await playAlarmSound();
-                    setTimeout(() => stopAlarmSound(), 3000);
-                  } catch (e) {
-                    addLog(`Test failed: ${e}`);
-                  }
-                }}
-              >
-                <MaterialCommunityIcons name="volume-high" size={20} color="#00E5FF" />
-                <Text style={styles.testSoundText}>TEST ALARM SOUND</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Accelerometer Chart */}
-            <View style={styles.chartCard}>
-              <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="axis-arrow" size={20} color="#00E5FF" />
-                <Text style={styles.cardTitle}>Accelerometer (m/s²)</Text>
-              </View>
-              <LineChart
-                data={{
-                  labels: timeLabels,
-                  datasets: [
-                    { data: accelHistoryX, color: (opacity = 1) => `rgba(255, 59, 48, ${opacity})`, strokeWidth: 2 }, // Red X
-                    { data: accelHistoryY, color: (opacity = 1) => `rgba(52, 199, 89, ${opacity})`, strokeWidth: 2 }, // Green Y
-                    { data: accelHistoryZ, color: (opacity = 1) => `rgba(0, 229, 255, ${opacity})`, strokeWidth: 2 }  // Blue Z
-                  ],
-                  legend: ["X", "Y", "Z"]
-                }}
-                width={SCREEN_WIDTH * 0.9}
-                height={180}
-                chartConfig={{
-                  backgroundColor: "#1E1E1E",
-                  backgroundGradientFrom: "#1E1E1E",
-                  backgroundGradientTo: "#1E1E1E",
-                  decimalPlaces: 1,
-                  color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
-                  labelColor: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
-                  propsForDots: { r: "0" }
-                }}
-                bezier
-                style={styles.chart}
-              />
-            </View>
-
-            {/* Gyroscope Chart */}
-            <View style={styles.chartCard}>
-              <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="rotate-3d-variant" size={20} color="#FFD60A" />
-                <Text style={styles.cardTitle}>Gyroscope (rad/s)</Text>
-              </View>
-              <LineChart
-                data={{
-                  labels: ["", "", "", "", "", ""],
-                  datasets: [
-                    { data: gyroHistoryX, color: (opacity = 1) => `rgba(255, 59, 48, ${opacity})`, strokeWidth: 2 }, // Red X
-                    { data: gyroHistoryY, color: (opacity = 1) => `rgba(52, 199, 89, ${opacity})`, strokeWidth: 2 }, // Green Y
-                    { data: gyroHistoryZ, color: (opacity = 1) => `rgba(255, 214, 10, ${opacity})`, strokeWidth: 2 }  // Yellow Z
-                  ],
-                  legend: ["X", "Y", "Z"]
-                }}
-                width={SCREEN_WIDTH * 0.9}
-                height={180}
-                chartConfig={{
-                  backgroundColor: "#1E1E1E",
-                  backgroundGradientFrom: "#1E1E1E",
-                  backgroundGradientTo: "#1E1E1E",
-                  decimalPlaces: 1,
-                  color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
-                  labelColor: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
-                  propsForDots: { r: "0" }
-                }}
-                bezier
-                style={styles.chart}
-              />
-            </View>
+          <Text style={[styles.heroMotion, { color: riskTone.text }]}>{riskAnalysis.motionState} detected</Text>
+          <Text style={styles.heroRecommendation}>{riskAnalysis.recommendation}</Text>
+          <View style={styles.heroStats}>
+            <View style={styles.heroStat}><Text style={styles.heroStatLabel}>Confidence</Text><Text style={styles.heroStatValue}>{riskAnalysis.confidence}%</Text></View>
+            <View style={styles.heroStat}><Text style={styles.heroStatLabel}>Impact delta</Text><Text style={styles.heroStatValue}>{currentImpact.toFixed(1)} m/s²</Text></View>
+            <View style={styles.heroStat}><Text style={styles.heroStatLabel}>Last sync</Text><Text style={styles.heroStatValue}>{riskAnalysis.lastSyncedAt}</Text></View>
           </View>
-        </View>
+          <View style={styles.heroButtons}>
+            <TouchableOpacity style={[styles.primaryButton, { backgroundColor: isMonitoring ? '#F4F7FB' : '#32C48D' }]} onPress={isMonitoring ? () => void stopMonitoring() : () => void startMonitoring()}>
+              <MaterialCommunityIcons name={isMonitoring ? 'stop-circle-outline' : 'play-circle-outline'} size={18} color={isMonitoring ? '#0F1722' : '#08231C'} />
+              <Text style={[styles.primaryButtonText, { color: isMonitoring ? '#0F1722' : '#08231C' }]}>{isMonitoring ? 'Stop monitoring' : 'Start monitoring'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryButton} onPress={() => void sendSMSAlert('manual')}>
+              <MaterialCommunityIcons name="alarm-light-outline" size={18} color="#F4F7FB" />
+              <Text style={styles.secondaryButtonText}>Send SOS now</Text>
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
 
-        {/* Metrics Grid */}
-        <Text style={styles.sectionTitle}>Live Trip Metrics</Text>
         <View style={styles.metricsGrid}>
-          <MetricCard
-            icon="speedometer"
-            title="SPEED"
-            value={`${speed} km/h`}
-            color="#00E5FF"
-          />
-          <MetricCard
-            icon="map-marker"
-            title="LOCATION"
-            value={locationName}
-            subValue={location ? `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}` : 'GPS off'}
-            color="#00E5FF"
-          />
-          <MetricCard
-            icon="map-marker-radius"
-            title="COORDINATES"
-            value={location ? `${location.latitude.toFixed(6)}°` : 'N/A'}
-            subValue={location ? `${location.longitude.toFixed(6)}°` : 'N/A'}
-            color="#34C759"
-          />
-          <MetricCard
-            icon="weather-cloudy"
-            title="WEATHER"
-            value={`${weather}, ${temperature}°C`}
-            color="#00E5FF"
-          />
-          <MetricCard
-            icon="car-multiple"
-            title="TRAFFIC"
-            value={trafficDensity}
-            subValue={`Congestion: ${estimatedCongestion}%`}
-            color="#FFD60A"
-          />
-          {/* Nearby Roads */}
-          <MetricCard
-            icon="road-variant"
-            title="NEARBY ROADS"
-            value={nearbyRoads.length > 0 ? nearbyRoads.join(', ') : 'None'}
-            color="#34C759"
-          />
-          {/* Major Highways */}
-          <MetricCard
-            icon="highway"
-            title="MAJOR HIGHWAYS"
-            value={majorHighways.length > 0 ? majorHighways.join(', ') : 'None'}
-            color="#FF3B30"
-          />
-          <MetricCard
-            icon="alert-circle"
-            title="ACCIDENT HISTORY"
-            value={accidentHistory}
-            subValue={`Risk: ${riskLevel}`}
-            color={riskLevel === 'High' ? '#FF3B30' : riskLevel === 'Medium' ? '#FFD60A' : '#34C759'}
-          />
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Speed</Text><Text style={styles.metricValue}>{speedKmph} km/h</Text><Text style={styles.metricHelper}>Live GPS speed</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Location</Text><Text style={styles.metricValue}>{locationLabel}</Text><Text style={styles.metricHelper}>{location ? `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}` : 'Waiting for coordinates'}</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Traffic</Text><Text style={styles.metricValue}>{regionalSummary.trafficDensity}</Text><Text style={styles.metricHelper}>Congestion {regionalSummary.congestionLevel}%</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Regional risk</Text><Text style={styles.metricValue}>{regionalSummary.riskLevel}</Text><Text style={styles.metricHelper}>{regionalSummary.yearlyAccidents} accidents/year</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Trip time</Text><Text style={styles.metricValue}>{tripDuration}</Text><Text style={styles.metricHelper}>Current session</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Last alert</Text><Text style={styles.metricValue}>{lastAlertTime}</Text><Text style={styles.metricHelper}>Most recent SOS</Text></View>
         </View>
 
-        {/* Predefined SOS numbers */}
-        <Text style={styles.sectionTitle}>Predefined SOS numbers</Text>
-        <Text style={styles.predefinedHint}>These numbers always receive the SOS alert with your location when countdown ends.</Text>
-        <View style={styles.predefinedRow}>
-          <TextInput
-            style={styles.predefinedInput}
-            placeholder="e.g. +919876543210"
-            placeholderTextColor="#666"
-            value={newPredefinedNumber}
-            onChangeText={setNewPredefinedNumber}
-            keyboardType="phone-pad"
-            returnKeyType="done"
-            onSubmitEditing={addPredefinedNumber}
-          />
-          <TouchableOpacity style={styles.predefinedAddBtn} onPress={addPredefinedNumber}>
-            <MaterialCommunityIcons name="plus" size={22} color="#121212" />
-            <Text style={styles.predefinedAddBtnText}>Add</Text>
-          </TouchableOpacity>
-        </View>
-        {predefinedNumbers.length > 0 && (
-          <View style={styles.predefinedList}>
-            {predefinedNumbers.map((num) => (
-              <View key={num} style={styles.predefinedItem}>
-                <MaterialCommunityIcons name="phone" size={18} color="#00E5FF" />
-                <Text style={styles.predefinedItemText}>{num}</Text>
-                <TouchableOpacity onPress={() => removePredefinedNumber(num)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                  <MaterialCommunityIcons name="close-circle" size={22} color="#FF3B30" />
-                </TouchableOpacity>
-              </View>
-            ))}
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Live readings</Text>
+          <View style={styles.readingRow}><Text style={styles.readingName}>Acceleration</Text><Text style={styles.readingValue}>X {liveAccel.x.toFixed(2)}  Y {liveAccel.y.toFixed(2)}  Z {liveAccel.z.toFixed(2)} m/s²</Text></View>
+          <View style={styles.readingRow}><Text style={styles.readingName}>Gyroscope</Text><Text style={styles.readingValue}>X {gyroData.x.toFixed(2)}  Y {gyroData.y.toFixed(2)}  Z {gyroData.z.toFixed(2)} rad/s</Text></View>
+          <View style={styles.sensorSummary}>
+            <View style={styles.sensorBox}><Text style={styles.sensorLabel}>Impact delta</Text><Text style={styles.sensorValue}>{currentImpact.toFixed(2)} m/s²</Text></View>
+            <View style={styles.sensorBox}><Text style={styles.sensorLabel}>Angular velocity</Text><Text style={styles.sensorValue}>{currentAngularVelocity.toFixed(2)} rad/s</Text></View>
           </View>
-        )}
-
-        {/* Emergency Contacts */}
-        <View style={styles.contactsHeader}>
-          <Text style={styles.sectionTitle}>Emergency Contacts</Text>
-          <TouchableOpacity style={styles.addContactBtn} onPress={pickContact}>
-            <MaterialCommunityIcons name="plus-circle" size={24} color="#00E5FF" />
-          </TouchableOpacity>
         </View>
 
-        {emergencyContacts.length === 0 && predefinedNumbers.length === 0 ? (
-          <View style={styles.noContactsContainer}>
-            <Text style={styles.noContactsText}>No emergency contacts selected</Text>
-            <Text style={styles.helplineText}>Showing helpline numbers:</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.contactsScroll}>
-              {helplineContacts.map((contact, index) => (
-                <ContactCard
-                  key={contact.id}
-                  name={contact.name}
-                  relation={contact.relation}
-                  phone={contact.phone}
-                  color={index === 0 ? '#FF3B30' : index === 1 ? '#34C759' : '#FFD60A'}
-                />
-              ))}
-            </ScrollView>
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Why the score changed</Text>
+          {riskAnalysis.reasons.length > 0 ? riskAnalysis.reasons.map((reason) => (
+            <View key={reason} style={styles.reasonChip}><MaterialCommunityIcons name="chevron-right" size={16} color="#D07A24" /><Text style={styles.reasonText}>{reason}</Text></View>
+          )) : <Text style={styles.emptyText}>No critical triggers yet. Start monitoring to see live explanations.</Text>}
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Emergency contacts</Text>
+            <TouchableOpacity style={styles.inlineAction} onPress={pickContact}><MaterialCommunityIcons name="plus" size={16} color="#0F1722" /><Text style={styles.inlineActionText}>Import</Text></TouchableOpacity>
           </View>
-        ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.contactsScroll}>
-            {predefinedNumbers.map((num, index) => (
-              <View key={`pre-${num}`} style={styles.contactCard}>
-                <View style={[styles.contactAvatar, { backgroundColor: '#00E5FF' }]}>
-                  <MaterialCommunityIcons name="phone" size={20} color="#121212" />
-                </View>
-                <View>
-                  <Text style={styles.contactName}>SOS #{index + 1}</Text>
-                  <Text style={styles.contactRelation}>Predefined</Text>
-                  <Text style={styles.contactPhone}>{num}</Text>
-                </View>
+          <Text style={styles.helperText}>These numbers receive your name, risk, trigger, and location in the SOS.</Text>
+          <View style={styles.numberRow}>
+            <TextInput style={styles.numberInput} placeholder="Add direct SOS number" placeholderTextColor="#7C8794" value={newPredefinedNumber} onChangeText={setNewPredefinedNumber} keyboardType="phone-pad" returnKeyType="done" onSubmitEditing={addPredefinedNumber} />
+            <TouchableOpacity style={styles.addButton} onPress={addPredefinedNumber}><MaterialCommunityIcons name="plus" size={18} color="#08231C" /><Text style={styles.addButtonText}>Add</Text></TouchableOpacity>
+          </View>
+          {[...predefinedNumbers.map((phone) => ({ id: `pre-${phone}`, name: 'Direct SOS', phone, relation: 'Predefined' })), ...(emergencyContacts.length > 0 ? emergencyContacts : HELPLINES)].map((contact) => (
+            <View key={contact.id} style={styles.contactRow}>
+              <View style={styles.contactAvatar}><Text style={styles.contactAvatarText}>{contact.name.charAt(0)}</Text></View>
+              <View style={styles.contactTextBlock}>
+                <Text style={styles.contactName}>{contact.name}</Text>
+                <Text style={styles.contactMeta}>{contact.relation || 'Emergency'} · {contact.phone}</Text>
               </View>
-            ))}
-            {emergencyContacts.map((contact, index) => (
-              <ContactCard
-                key={contact.id}
-                name={contact.name}
-                relation={contact.relation || 'Emergency'}
-                phone={contact.phone}
-                color={index % 3 === 0 ? '#00E5FF' : index % 3 === 1 ? '#34C759' : '#FFD60A'}
-              />
-            ))}
-          </ScrollView>
-        )}
+              {contact.relation === 'Predefined' ? <TouchableOpacity onPress={() => removePredefinedNumber(contact.phone)}><MaterialCommunityIcons name="close-circle" size={22} color="#B2455C" /></TouchableOpacity> : null}
+            </View>
+          ))}
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Activity</Text>
+          {systemLogs.length > 0 ? systemLogs.map((log) => <Text key={log} style={styles.logEntry}>{log}</Text>) : <Text style={styles.emptyText}>No activity yet. Start monitoring to begin the trip.</Text>}
+        </View>
       </ScrollView>
-      {isAccidentDialogVisible && (
+
+      {isAccidentDialogVisible ? (
         <View style={styles.accidentOverlay}>
           <View style={styles.accidentCard}>
-            <Text style={styles.accidentTitle}>Accident Detected</Text>
-            <Text style={styles.accidentMessage}>
-              Sending SOS in {accidentCountdown} seconds...
-            </Text>
-            <Text style={styles.accidentSubMessage}>
-              Your emergency contacts will receive an alert with your GPS location.
-            </Text>
-            <View style={styles.accidentButtonsRow}>
-              <TouchableOpacity
-                style={[styles.accidentButton, styles.cancelButton]}
-                onPress={cancelAccidentFlow}
-              >
-                <Text style={styles.cancelButtonText}>CANCEL</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.accidentButton, styles.sosButton]}
-                onPress={triggerSOS}
-              >
-                <Text style={styles.sosButtonText}>SEND SOS NOW</Text>
-              </TouchableOpacity>
+            <Text style={styles.accidentTitle}>Possible accident detected</Text>
+            <Text style={styles.accidentMessage}>Sending SOS in {accidentCountdown} seconds.</Text>
+            <Text style={styles.accidentSubMessage}>Your contacts will receive your name, risk score, trigger, and current location.</Text>
+            <View style={styles.accidentActions}>
+              <TouchableOpacity style={styles.cancelButton} onPress={() => void cancelAccidentFlow()}><Text style={styles.cancelButtonText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.sosButton} onPress={() => void triggerSOS()}><Text style={styles.sosButtonText}>Send SOS now</Text></TouchableOpacity>
             </View>
           </View>
         </View>
-      )}
+      ) : null}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#121212',
-  },
-  scrollContent: {
-    padding: 16,
-    paddingBottom: 20,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 24,
-    marginTop: 10,
-  },
-  logoContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  logoBox: {
-    width: 32,
-    height: 32,
-    backgroundColor: '#00E5FF',
-    borderRadius: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  logoText: {
-    color: '#121212',
-    fontWeight: 'bold',
-    fontSize: 20,
-  },
-  appName: {
-    color: '#00E5FF',
-    fontWeight: 'bold',
-    fontSize: 18,
-    letterSpacing: 1,
-  },
-  appTagline: {
-    color: '#666',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  emergencyBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1E1E1E',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  emergencyDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#FF3B30',
-    marginRight: 6,
-  },
-  emergencyText: {
-    color: '#CCC',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  gridContainer: {
-    marginBottom: 20,
-  },
-  leftColumn: {
-    gap: 16,
-  },
-  safetyCard: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#333',
-    overflow: 'hidden', // Ensure background log stays inside
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-    gap: 8,
-  },
-  cardTitle: {
-    color: '#FFF',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  riskCircleContainer: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  riskCircle: {
-    width: 160,
-    height: 160,
-    borderRadius: 80,
-    borderWidth: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#121212',
-  },
-  riskValue: {
-    fontSize: 36,
-    fontWeight: 'bold',
-  },
-  riskLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    marginTop: 4,
-  },
-  safetyStatsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    backgroundColor: '#121212',
-    padding: 16,
-    borderRadius: 12,
-  },
-  safetyStat: {
-    alignItems: 'center',
-  },
-  statValue: {
-    color: '#FFF',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  statLabel: {
-    color: '#666',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  motionStateText: {
-    color: '#FFD60A',
-    fontSize: 12,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  chartCard: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#333',
-    marginBottom: 20,
-  },
-  chart: {
-    marginVertical: 8,
-    borderRadius: 16,
-    paddingRight: 40,
-  },
-  sectionTitle: {
-    color: '#FFF',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 12,
-    marginTop: 8,
-  },
-  metricsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    marginBottom: 24,
-  },
-  metricCard: {
-    width: '48%',
-    backgroundColor: '#1E1E1E',
-    borderRadius: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#333',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  metricTitle: {
-    color: '#666',
-    fontSize: 10,
-    fontWeight: 'bold',
-    marginBottom: 2,
-  },
-  metricValue: {
-    color: '#FFF',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  metricSubValue: {
-    color: '#999',
-    fontSize: 10,
-  },
-  contactsScroll: {
-    marginBottom: 24,
-  },
-  predefinedHint: {
-    color: '#999',
-    fontSize: 12,
-    marginBottom: 10,
-  },
-  predefinedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 12,
-  },
-  predefinedInput: {
-    flex: 1,
-    backgroundColor: '#1E1E1E',
-    borderWidth: 1,
-    borderColor: '#333',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    color: '#FFF',
-    fontSize: 16,
-  },
-  predefinedAddBtn: {
-    backgroundColor: '#00E5FF',
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  predefinedAddBtnText: {
-    color: '#121212',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  predefinedList: {
-    marginBottom: 20,
-    gap: 8,
-  },
-  predefinedItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1E1E1E',
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#333',
-    gap: 10,
-  },
-  predefinedItemText: {
-    flex: 1,
-    color: '#FFF',
-    fontSize: 14,
-  },
-  contactCard: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 12,
-    padding: 16,
-    marginRight: 12,
-    borderWidth: 1,
-    borderColor: '#333',
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: 200,
-    gap: 12,
-  },
-  contactAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  avatarText: {
-    color: '#121212',
-    fontWeight: 'bold',
-    fontSize: 18,
-  },
-  contactName: {
-    color: '#FFF',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  contactRelation: {
-    color: '#999',
-    fontSize: 12,
-  },
-  contactPhone: {
-    color: '#666',
-    fontSize: 10,
-    marginTop: 2,
-  },
-  mainButton: {
-    borderRadius: 12,
-    overflow: 'hidden',
-    marginTop: 10,
-  },
-  gradientBtn: {
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  mainBtnText: {
-    color: '#121212',
-    fontSize: 16,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  startBtn: {},
-  stopBtn: {},
-  contactsHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  addContactBtn: {
-    padding: 8,
-  },
-  noContactsContainer: {
-    marginBottom: 24,
-  },
-  noContactsText: {
-    color: '#999',
-    fontSize: 14,
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  helplineText: {
-    color: '#FFD60A',
-    fontSize: 12,
-    textAlign: 'center',
-    marginBottom: 12,
-    fontWeight: 'bold',
-  },
-  logCard: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#333',
-    marginBottom: 24,
-    minHeight: 150,
-  },
-  noLogsText: {
-    color: '#666',
-    fontSize: 14,
-    textAlign: 'center',
-    fontStyle: 'italic',
-    marginTop: 20,
-  },
-  logEntry: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  logText: {
-    color: '#CCC',
-    fontSize: 12,
-    flex: 1,
-  },
-  logBackgroundContainer: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    right: 0,
-    padding: 10,
-    justifyContent: 'flex-end',
-    opacity: 0.15, // Faint background effect
-    zIndex: 0,
-  },
-  logBackgroundText: {
-    color: '#00E5FF',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 10,
-    marginBottom: 2,
-  },
-  accidentOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  accidentCard: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#FF3B30',
-    width: '100%',
-    maxWidth: 380,
-  },
-  accidentTitle: {
-    color: '#FF3B30',
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  accidentMessage: {
-    color: '#FFF',
-    fontSize: 16,
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  accidentSubMessage: {
-    color: '#999',
-    fontSize: 12,
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  accidentButtonsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 8,
-    gap: 12,
-  },
-  accidentButton: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  cancelButton: {
-    backgroundColor: '#333',
-  },
-  sosButton: {
-    backgroundColor: '#FF3B30',
-  },
-  cancelButtonText: {
-    color: '#FFF',
-    fontWeight: '600',
-    fontSize: 14,
-  },
-  sosButtonText: {
-    color: '#FFF',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  testSoundBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0, 229, 255, 0.1)',
-    borderWidth: 1,
-    borderColor: '#00E5FF',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-  },
-  testSoundText: {
-    color: '#00E5FF',
-    fontSize: 14,
-    fontWeight: 'bold',
-    marginLeft: 8,
-  },
+  safeArea: { flex: 1, backgroundColor: '#F3F5F8' },
+  content: { padding: 18, paddingBottom: 28, gap: 16 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
+  eyebrow: { color: '#6E7B88', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1.4, marginBottom: 4 },
+  title: { color: '#0F1722', fontSize: 28, fontWeight: '800', letterSpacing: 0.4 },
+  subtitle: { color: '#546170', fontSize: 14, marginTop: 2 },
+  statusPill: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  statusText: { color: '#F4F7FB', fontWeight: '700', fontSize: 12 },
+  heroCard: { borderRadius: 28, padding: 20, borderWidth: 1, gap: 14 },
+  heroRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  heroLabel: { color: '#90A0B3', fontSize: 13, textTransform: 'uppercase', letterSpacing: 1.1, marginBottom: 6 },
+  heroValue: { fontSize: 56, fontWeight: '800', lineHeight: 60 },
+  heroBadge: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 },
+  heroBadgeText: { color: '#0F1722', fontWeight: '800', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 },
+  heroMotion: { fontSize: 22, fontWeight: '700' },
+  heroRecommendation: { color: '#D8E1EA', fontSize: 15, lineHeight: 22 },
+  heroStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  heroStat: { flex: 1, minWidth: 90, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 18, padding: 12 },
+  heroStatLabel: { color: '#90A0B3', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 6 },
+  heroStatValue: { color: '#F4F7FB', fontSize: 15, fontWeight: '700' },
+  heroButtons: { flexDirection: 'row', gap: 12, flexWrap: 'wrap' },
+  primaryButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 18, paddingHorizontal: 18, paddingVertical: 14, flex: 1, minWidth: 160 },
+  primaryButtonText: { fontSize: 15, fontWeight: '800' },
+  secondaryButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 18, paddingHorizontal: 18, paddingVertical: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', flex: 1, minWidth: 160 },
+  secondaryButtonText: { color: '#F4F7FB', fontSize: 15, fontWeight: '700' },
+  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  metricCard: { width: '48%', minWidth: 150, backgroundColor: '#FFFFFF', borderRadius: 22, padding: 16, borderWidth: 1, borderColor: '#E5EAF0' },
+  metricLabel: { color: '#758394', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 6 },
+  metricValue: { color: '#0F1722', fontSize: 18, fontWeight: '800', marginBottom: 4 },
+  metricHelper: { color: '#607081', fontSize: 12, lineHeight: 16 },
+  card: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 18, borderWidth: 1, borderColor: '#E5EAF0' },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, gap: 12 },
+  sectionTitle: { color: '#0F1722', fontSize: 18, fontWeight: '800', marginBottom: 10 },
+  readingRow: { paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#EEF2F6', gap: 6 },
+  readingName: { color: '#0F1722', fontSize: 15, fontWeight: '700' },
+  readingValue: { color: '#243244', fontSize: 13, fontWeight: '600' },
+  sensorSummary: { flexDirection: 'row', gap: 12, marginTop: 16 },
+  sensorBox: { flex: 1, backgroundColor: '#F4F7FB', borderRadius: 18, padding: 14 },
+  sensorLabel: { color: '#6B798B', fontSize: 12, marginBottom: 6 },
+  sensorValue: { color: '#0F1722', fontSize: 16, fontWeight: '800' },
+  reasonChip: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FFF4E9', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 10, marginTop: 10 },
+  reasonText: { color: '#7C5114', fontSize: 13, fontWeight: '600', flex: 1 },
+  emptyText: { color: '#738194', fontSize: 13, lineHeight: 19 },
+  inlineAction: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#D7F3EA', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7 },
+  inlineActionText: { color: '#0F1722', fontSize: 12, fontWeight: '700' },
+  helperText: { color: '#657487', fontSize: 13, lineHeight: 19, marginBottom: 14 },
+  numberRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
+  numberInput: { flex: 1, backgroundColor: '#F4F7FB', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#E5EAF0', color: '#0F1722' },
+  addButton: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#32C48D', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 12 },
+  addButtonText: { color: '#08231C', fontWeight: '800' },
+  contactRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#EEF2F6' },
+  contactAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#0F1722', alignItems: 'center', justifyContent: 'center' },
+  contactAvatarText: { color: '#F4F7FB', fontSize: 16, fontWeight: '800' },
+  contactTextBlock: { flex: 1 },
+  contactName: { color: '#0F1722', fontSize: 15, fontWeight: '700', marginBottom: 2 },
+  contactMeta: { color: '#657487', fontSize: 12 },
+  logEntry: { color: '#243244', fontSize: 13, lineHeight: 19, paddingVertical: 6, borderTopWidth: 1, borderTopColor: '#EEF2F6' },
+  accidentOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(8, 11, 16, 0.78)', justifyContent: 'center', alignItems: 'center', padding: 22 },
+  accidentCard: { width: '100%', maxWidth: 360, backgroundColor: '#FFFFFF', borderRadius: 28, padding: 22 },
+  accidentTitle: { color: '#A12A44', fontSize: 24, fontWeight: '800', marginBottom: 8 },
+  accidentMessage: { color: '#0F1722', fontSize: 16, fontWeight: '700', marginBottom: 8 },
+  accidentSubMessage: { color: '#607081', fontSize: 13, lineHeight: 19 },
+  accidentActions: { flexDirection: 'row', gap: 12, marginTop: 20 },
+  cancelButton: { flex: 1, backgroundColor: '#EDF1F5', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  cancelButtonText: { color: '#0F1722', fontWeight: '700' },
+  sosButton: { flex: 1, backgroundColor: '#FF4D67', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  sosButtonText: { color: '#FFFFFF', fontWeight: '800' },
 });

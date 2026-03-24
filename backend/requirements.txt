@@ -1,11 +1,13 @@
 django>=4.2
 djangorestframework
 django-cors-headers
+dj-database-url
 redis
 celery
 requests
 twilio
 python-dotenv
+psycopg[binary]
 numpy
 pandas
 scikit-learn

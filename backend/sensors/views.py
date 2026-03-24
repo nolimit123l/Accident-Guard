@@ -1,8 +1,9 @@
 import logging
-from datetime import datetime
+from math import sqrt
 
 from django.contrib.auth import authenticate
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.authtoken.models import Token
 from rest_framework.response import Response
@@ -21,12 +22,14 @@ from .sms_service import sms_service
 
 logger = logging.getLogger(__name__)
 
-# Driving event detection thresholds (SI units: m/s²)
+GRAVITY_MS2 = 9.81
 HARSH_BRAKING_THRESHOLD = -4.4
 SUDDEN_ACCEL_THRESHOLD = 4.0
 HARSH_TURN_THRESHOLD = 4.0
 AGGRESSIVE_GYRO_THRESHOLD = 2.0
 OVERSPEED_LIMIT = 80
+IMPACT_BUMP_DELTA = 4.5
+IMPACT_CRITICAL_DELTA = 10.0
 
 
 def get_request_user(request):
@@ -36,25 +39,11 @@ def get_request_user(request):
     return None
 
 
-def normalize_phone_numbers(raw_phone_numbers):
-    normalized = []
-    for num in raw_phone_numbers:
-        num_str = str(num).strip().replace(" ", "")
-        if not num_str:
-            continue
-        if not num_str.startswith("+"):
-            num_str = f"+91{num_str}"
-        if num_str not in normalized:
-            normalized.append(num_str)
-    return normalized
-
-
-def derive_motion_state(risk_score, detected_events):
-    if risk_score >= 70:
-        return SensorReading.MOTION_STATE_ACCIDENT
-    if risk_score >= 30 or detected_events:
-        return SensorReading.MOTION_STATE_BUMP
-    return SensorReading.MOTION_STATE_NORMAL
+def parse_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def parse_limit(raw_limit, default=50):
@@ -63,6 +52,157 @@ def parse_limit(raw_limit, default=50):
     except (TypeError, ValueError):
         limit = default
     return max(1, min(limit, 200))
+
+
+def normalize_phone_numbers(raw_phone_numbers):
+    normalized = []
+    for number in raw_phone_numbers:
+        number_str = str(number).strip().replace(" ", "")
+        if not number_str:
+            continue
+        if not number_str.startswith("+"):
+            number_str = f"+91{number_str}"
+        if number_str not in normalized:
+            normalized.append(number_str)
+    return normalized
+
+
+def normalize_acceleration_units(accel_x, accel_y, accel_z):
+    magnitude = sqrt((accel_x * accel_x) + (accel_y * accel_y) + (accel_z * accel_z))
+    if magnitude and magnitude < 4.0:
+        return (
+            accel_x * GRAVITY_MS2,
+            accel_y * GRAVITY_MS2,
+            accel_z * GRAVITY_MS2,
+            "g",
+        )
+    return accel_x, accel_y, accel_z, "m_s2"
+
+
+def risk_band_from_score(score):
+    if score >= 80:
+        return "critical"
+    if score >= 55:
+        return "high"
+    if score >= 25:
+        return "guarded"
+    return "low"
+
+
+def derive_motion_state(risk_score, impact_delta, detected_events):
+    if risk_score >= 75 or impact_delta >= IMPACT_CRITICAL_DELTA:
+        return SensorReading.MOTION_STATE_ACCIDENT
+    if risk_score >= 35 or impact_delta >= IMPACT_BUMP_DELTA or detected_events:
+        return SensorReading.MOTION_STATE_BUMP
+    return SensorReading.MOTION_STATE_NORMAL
+
+
+def build_recommended_action(risk_score, motion_state, detected_events):
+    if motion_state == SensorReading.MOTION_STATE_ACCIDENT or risk_score >= 80:
+        return "Immediate stop. Check the rider and send SOS."
+    if risk_score >= 55:
+        return "High risk. Slow down and review surroundings."
+    if detected_events:
+        return "Caution. Reduce speed and stabilize the vehicle."
+    return "Normal monitoring."
+
+
+def calculate_confidence_score(has_ml_signal, model_breakdown, has_location, speed_kmph, detected_events, impact_delta):
+    confidence = 58
+
+    if has_location:
+        confidence += 8
+    if speed_kmph > 0:
+        confidence += 6
+    if has_ml_signal:
+        confidence += 12
+    if "random_forest" in model_breakdown:
+        confidence += 6
+    if "neural_network" in model_breakdown:
+        confidence += 4
+    if "cnn_1d" in model_breakdown:
+        confidence += 6
+    if impact_delta >= IMPACT_BUMP_DELTA:
+        confidence += 5
+    if detected_events:
+        confidence += min(8, len(detected_events) * 2)
+
+    return max(55, min(98, int(round(confidence))))
+
+
+def calculate_rule_based_risk(accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, speed_kmph, timestamp_iso):
+    detected_events = []
+    trigger_reasons = []
+
+    magnitude = sqrt((accel_x * accel_x) + (accel_y * accel_y) + (accel_z * accel_z))
+    impact_delta = abs(magnitude - GRAVITY_MS2)
+    max_angular_velocity = max(abs(gyro_x), abs(gyro_y), abs(gyro_z))
+    score = 0.0
+
+    if impact_delta >= IMPACT_CRITICAL_DELTA:
+        detected_events.append(
+            {"type": "Impact Spike", "severity": "critical", "timestamp": timestamp_iso}
+        )
+        trigger_reasons.append("Large impact detected")
+        score += 45
+    elif impact_delta >= IMPACT_BUMP_DELTA:
+        detected_events.append(
+            {"type": "Road Shock", "severity": "medium", "timestamp": timestamp_iso}
+        )
+        trigger_reasons.append("Sudden vertical shock detected")
+        score += 18
+
+    if accel_y < HARSH_BRAKING_THRESHOLD:
+        detected_events.append(
+            {"type": "Harsh Braking", "severity": "high", "timestamp": timestamp_iso}
+        )
+        trigger_reasons.append("Strong braking pattern")
+        score += 20
+
+    if accel_y > SUDDEN_ACCEL_THRESHOLD:
+        detected_events.append(
+            {"type": "Sudden Acceleration", "severity": "medium", "timestamp": timestamp_iso}
+        )
+        trigger_reasons.append("Rapid acceleration detected")
+        score += 12
+
+    if abs(accel_x) > HARSH_TURN_THRESHOLD:
+        detected_events.append(
+            {"type": "Harsh Turn", "severity": "high", "timestamp": timestamp_iso}
+        )
+        trigger_reasons.append("Sharp lateral movement")
+        score += 18
+
+    if max_angular_velocity > AGGRESSIVE_GYRO_THRESHOLD:
+        detected_events.append(
+            {"type": "Aggressive Rotation", "severity": "medium", "timestamp": timestamp_iso}
+        )
+        trigger_reasons.append("Phone rotation exceeded safe range")
+        score += 14
+
+    if speed_kmph > OVERSPEED_LIMIT:
+        severity = "high" if speed_kmph > OVERSPEED_LIMIT + 20 else "medium"
+        detected_events.append(
+            {"type": "Overspeed", "severity": severity, "timestamp": timestamp_iso}
+        )
+        trigger_reasons.append("Vehicle speed exceeded safe limit")
+        score += 20 if severity == "high" else 12
+
+    if speed_kmph > 50 and impact_delta >= IMPACT_BUMP_DELTA:
+        trigger_reasons.append("Impact occurred while moving at speed")
+        score += 12
+
+    if len(detected_events) >= 3:
+        score += 8
+
+    unique_reasons = list(dict.fromkeys(trigger_reasons))
+    return {
+        "score": min(100.0, round(score, 2)),
+        "detected_events": detected_events,
+        "impact_delta": round(impact_delta, 2),
+        "max_angular_velocity": round(max_angular_velocity, 2),
+        "trigger_reasons": unique_reasons[:3],
+    }
 
 
 class RegisterAPI(APIView):
@@ -221,50 +361,102 @@ class AlertRecordListAPI(APIView):
 class TriggerAPI(APIView):
     def post(self, request):
         data = request.data
-        detected_events = []
-        now = datetime.now()
+        now = timezone.localtime()
         now_iso = now.isoformat()
 
-        speed = float(data.get('speed_kmph', 0))
-        accel_x = float(data.get('accel_x', 0))
-        accel_y = float(data.get('accel_y', 0))
-        accel_z = float(data.get('accel_z', 9.8))
-        gyro_x = float(data.get('gyro_x', 0))
-        gyro_y = float(data.get('gyro_y', 0))
-        gyro_z = float(data.get('gyro_z', 0))
+        speed_kmph = parse_float(data.get("speed_kmph"), 0.0)
+        raw_accel_x = parse_float(data.get("accel_x"), 0.0)
+        raw_accel_y = parse_float(data.get("accel_y"), 0.0)
+        raw_accel_z = parse_float(data.get("accel_z"), GRAVITY_MS2)
+        accel_x, accel_y, accel_z, accel_input_unit = normalize_acceleration_units(
+            raw_accel_x,
+            raw_accel_y,
+            raw_accel_z,
+        )
+        gyro_x = parse_float(data.get("gyro_x"), 0.0)
+        gyro_y = parse_float(data.get("gyro_y"), 0.0)
+        gyro_z = parse_float(data.get("gyro_z"), 0.0)
 
-        risk_score = 0.0
+        ml_risk_score = 0.0
         anomaly_score = 0.0
         model_breakdown = {}
 
-        # AI/ML
         if ANY_ML_LOADED:
             try:
-                sensor_sequence = data.get('sensor_sequence')  # Optional: list of 64 x {accel_x, ...}
-                risk_score, anomaly_score, model_breakdown = predict_risk(data, now, sensor_sequence)
-            except Exception as e:
-                logger.warning(f"ML prediction failed, using rule-based fallback: {e}")
+                ml_payload = dict(data)
+                ml_payload.update(
+                    {
+                        "accel_x": accel_x,
+                        "accel_y": accel_y,
+                        "accel_z": accel_z,
+                    }
+                )
+                sensor_sequence = data.get("sensor_sequence")
+                ml_risk_score, anomaly_score, model_breakdown = predict_risk(
+                    ml_payload,
+                    now,
+                    sensor_sequence,
+                )
+            except Exception as exc:
+                logger.warning("ML prediction failed, using rule-based fallback: %s", exc)
 
-        # Rule backup
-        if accel_y < HARSH_BRAKING_THRESHOLD:
-            detected_events.append({"type": "Harsh Braking", "severity": "high", "timestamp": now_iso})
-            risk_score += 30
-        if accel_y > SUDDEN_ACCEL_THRESHOLD:
-            detected_events.append({"type": "Sudden Acceleration", "severity": "medium", "timestamp": now_iso})
-            risk_score += 20
-        if abs(accel_x) > HARSH_TURN_THRESHOLD:
-            detected_events.append({"type": "Harsh Turn", "severity": "high", "timestamp": now_iso})
-            risk_score += 25
-        if any(abs(g) > AGGRESSIVE_GYRO_THRESHOLD for g in [gyro_x, gyro_y, gyro_z]):
-            detected_events.append({"type": "Aggressive Driving", "severity": "medium", "timestamp": now_iso})
-            risk_score += 15
-        if speed > OVERSPEED_LIMIT:
-            severity = "high" if speed > OVERSPEED_LIMIT + 20 else "medium"
-            detected_events.append({"type": "Overspeed", "severity": severity, "timestamp": now_iso})
-            risk_score += 20
+        rule_result = calculate_rule_based_risk(
+            accel_x,
+            accel_y,
+            accel_z,
+            gyro_x,
+            gyro_y,
+            gyro_z,
+            speed_kmph,
+            now_iso,
+        )
+        rule_score = rule_result["score"]
 
-        motion_state = derive_motion_state(risk_score, detected_events)
+        final_risk_score = rule_score
+        has_ml_signal = bool(model_breakdown)
+        if has_ml_signal:
+            final_risk_score = (ml_risk_score * 0.65) + (rule_score * 0.35)
+
+        if rule_result["impact_delta"] >= IMPACT_CRITICAL_DELTA and speed_kmph >= 30:
+            final_risk_score = max(final_risk_score, 82)
+        elif rule_result["impact_delta"] >= IMPACT_BUMP_DELTA and speed_kmph >= 15:
+            final_risk_score = max(final_risk_score, 45)
+
+        if len(rule_result["detected_events"]) >= 3:
+            final_risk_score = min(100, final_risk_score + 5)
+
+        final_risk_score = round(max(0, min(100, final_risk_score)), 2)
+        risk_band = risk_band_from_score(final_risk_score)
+        motion_state = derive_motion_state(
+            final_risk_score,
+            rule_result["impact_delta"],
+            rule_result["detected_events"],
+        )
+        confidence_score = calculate_confidence_score(
+            has_ml_signal,
+            model_breakdown,
+            has_location=bool(data.get("latitude") and data.get("longitude")),
+            speed_kmph=speed_kmph,
+            detected_events=rule_result["detected_events"],
+            impact_delta=rule_result["impact_delta"],
+        )
+        recommended_action = build_recommended_action(
+            final_risk_score,
+            motion_state,
+            rule_result["detected_events"],
+        )
+
         user = get_request_user(request)
+        prediction_breakdown = {
+            **model_breakdown,
+            "rule_score": round(rule_score, 2),
+            "ml_score": round(ml_risk_score, 2) if has_ml_signal else None,
+            "impact_delta": rule_result["impact_delta"],
+            "risk_band": risk_band,
+            "confidence_score": confidence_score,
+            "input_acceleration_unit": accel_input_unit,
+        }
+
         reading = SensorReading.objects.create(
             user=user,
             accel_x=accel_x,
@@ -273,36 +465,44 @@ class TriggerAPI(APIView):
             gyro_x=gyro_x,
             gyro_y=gyro_y,
             gyro_z=gyro_z,
-            speed_kmph=speed,
+            speed_kmph=speed_kmph,
             latitude=data.get("latitude"),
             longitude=data.get("longitude"),
-            risk_score=min(100, round(risk_score, 2)),
+            risk_score=final_risk_score,
             anomaly_score=round(anomaly_score, 2),
             motion_state=motion_state,
-            detected_events=detected_events,
-            prediction_breakdown=model_breakdown,
-            raw_payload=dict(data),
+            detected_events=rule_result["detected_events"],
+            prediction_breakdown=prediction_breakdown,
+            raw_payload={**dict(data), "normalized_acceleration_unit": accel_input_unit},
         )
 
         response_data = {
-            "accident_rate": min(100, round(risk_score, 2)),
-            "detected_events": detected_events,
             "status": "success",
+            "accident_rate": final_risk_score,
+            "risk_band": risk_band,
+            "confidence_score": confidence_score,
+            "recommended_action": recommended_action,
             "motion_state": motion_state,
+            "detected_events": rule_result["detected_events"],
+            "trigger_reasons": rule_result["trigger_reasons"],
+            "impact_delta": rule_result["impact_delta"],
+            "max_angular_velocity": rule_result["max_angular_velocity"],
+            "rule_score": round(rule_score, 2),
             "reading_id": reading.id,
         }
 
-        # AI
-        if model_breakdown:
+        if has_ml_signal:
             response_data["ai_models"] = {
                 "random_forest": RF_LOADED,
                 "neural_network": MLP_LOADED,
                 "cnn_1d": CNN_LOADED,
                 "anomaly_detection": ANOMALY_LOADED,
             }
-            response_data["prediction_breakdown"] = model_breakdown
-            if ANOMALY_LOADED:
-                response_data["anomaly_score"] = round(anomaly_score, 2)
+            response_data["prediction_breakdown"] = prediction_breakdown
+            response_data["ml_score"] = round(ml_risk_score, 2)
+
+        if ANOMALY_LOADED:
+            response_data["anomaly_score"] = round(anomaly_score, 2)
 
         return Response(response_data, status=status.HTTP_200_OK)
 
@@ -311,8 +511,7 @@ class SendSMSAlertAPI(APIView):
     def post(self, request):
         data = request.data
         user = get_request_user(request)
-        raw_phone_numbers = data.get("phone_numbers", [])
-        phone_numbers = normalize_phone_numbers(raw_phone_numbers)
+        phone_numbers = normalize_phone_numbers(data.get("phone_numbers", []))
 
         if not phone_numbers and user:
             phone_numbers = normalize_phone_numbers(
@@ -325,16 +524,27 @@ class SendSMSAlertAPI(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        risk_score = float(data.get('risk_score', 0))
+        reading_id = data.get("reading_id")
+        reading_queryset = SensorReading.objects.all()
+        if user:
+            reading_queryset = reading_queryset.filter(user=user)
+        reading = reading_queryset.filter(id=reading_id).first() if reading_id else None
+
+        risk_score = parse_float(
+            data.get("risk_score"),
+            default=reading.risk_score if reading else 0.0,
+        )
+        latitude = data.get("latitude")
+        longitude = data.get("longitude")
+        if reading:
+            latitude = latitude if latitude not in (None, "") else reading.latitude
+            longitude = longitude if longitude not in (None, "") else reading.longitude
         location = (
-            {"latitude": data.get("latitude"), "longitude": data.get("longitude")}
-            if data.get("latitude") and data.get("longitude")
+            {"latitude": latitude, "longitude": longitude}
+            if latitude not in (None, "") and longitude not in (None, "")
             else None
         )
 
-        results = sms_service.send_bulk_alerts(phone_numbers, risk_score, location)
-        success_count = sum(1 for r in results if r["success"])
-        failure_count = len(results) - success_count
         profile = getattr(user, "profile", None) if user else None
         sender_name = (
             data.get("sender_name")
@@ -342,17 +552,44 @@ class SendSMSAlertAPI(APIView):
             or (profile.full_name if profile and profile.full_name else "")
             or (user.username if user else "Unknown User")
         )
-        message_body = (
-            f"REFLEX SOS from {sender_name}. "
-            f"Risk {risk_score:.0f}%. "
-            f"Location: https://maps.google.com/?q={location['latitude']},{location['longitude']}"
-            if location
-            else f"REFLEX SOS from {sender_name}. Risk {risk_score:.0f}%."
+        motion_state = data.get("motion_state") or (reading.motion_state if reading else "")
+        risk_band = data.get("risk_band") or risk_band_from_score(risk_score)
+        trigger_source = data.get("trigger_source", AlertRecord.TRIGGER_AUTOMATIC)
+        detected_events = reading.detected_events if reading else []
+        timestamp = timezone.localtime(reading.created_at) if reading else timezone.localtime()
+
+        results = sms_service.send_bulk_alerts(
+            phone_numbers,
+            risk_score,
+            location,
+            sender_name=sender_name,
+            risk_band=risk_band,
+            motion_state=motion_state,
+            trigger_source=trigger_source,
+            detected_events=detected_events,
+            timestamp=timestamp,
+        )
+
+        success_count = sum(1 for result in results if result["success"])
+        failure_count = len(results) - success_count
+        message_body = next(
+            (result.get("message_body") for result in results if result.get("message_body")),
+            sms_service.build_message_body(
+                risk_score,
+                location=location,
+                sender_name=sender_name,
+                risk_band=risk_band,
+                motion_state=motion_state,
+                trigger_source=trigger_source,
+                detected_events=detected_events,
+                timestamp=timestamp,
+            ),
         )
 
         alert_record = AlertRecord.objects.create(
             user=user,
-            trigger_source=data.get("trigger_source", AlertRecord.TRIGGER_AUTOMATIC),
+            sensor_reading=reading,
+            trigger_source=trigger_source,
             status=(
                 AlertRecord.STATUS_SENT
                 if success_count == len(results)
@@ -364,9 +601,8 @@ class SendSMSAlertAPI(APIView):
             recipients=results,
             success_count=success_count,
             failure_count=failure_count,
-            latitude=data.get("latitude"),
-            longitude=data.get("longitude"),
-            sensor_reading_id=data.get("reading_id"),
+            latitude=latitude,
+            longitude=longitude,
         )
 
         if success_count == 0:
@@ -374,6 +610,7 @@ class SendSMSAlertAPI(APIView):
                 {
                     "status": "error",
                     "message": "All SMS attempts failed",
+                    "message_body": message_body,
                     "results": results,
                     "alert_id": alert_record.id,
                 },
@@ -384,6 +621,7 @@ class SendSMSAlertAPI(APIView):
             {
                 "status": "success",
                 "message": f"Alerts sent to {success_count} contacts",
+                "message_body": message_body,
                 "results": results,
                 "alert_id": alert_record.id,
             },
