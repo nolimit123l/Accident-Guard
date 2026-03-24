@@ -1,112 +1,132 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { router } from 'expo-router';
 
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
+import { useAuth } from '@/providers/AuthProvider';
 
-export default function TabTwoScreen() {
+export default function AccountScreen() {
+  const { profile, user, signOut } = useAuth();
+
+  const handleLogout = async () => {
+    await signOut();
+    router.replace('/login');
+  };
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
-      headerImage={
-        <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
-          style={styles.headerImage}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText
-          type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
-          Explore
-        </ThemedText>
-      </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
-    </ParallaxScrollView>
+    <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.heroCard}>
+        <Text style={styles.eyebrow}>ACCOUNT</Text>
+        <Text style={styles.title}>{profile?.full_name || user?.username || 'Driver'}</Text>
+        <Text style={styles.subtitle}>
+          Signed in users can sync contacts, readings, and SOS records with the backend.
+        </Text>
+      </View>
+
+      <View style={styles.infoCard}>
+        <Text style={styles.sectionTitle}>Profile</Text>
+
+        <Text style={styles.label}>Username</Text>
+        <Text style={styles.value}>{profile?.username || user?.username || 'N/A'}</Text>
+
+        <Text style={styles.label}>Email</Text>
+        <Text style={styles.value}>{profile?.email || user?.email || 'N/A'}</Text>
+
+        <Text style={styles.label}>Phone</Text>
+        <Text style={styles.value}>{profile?.phone_number || 'Not set'}</Text>
+
+        <Text style={styles.label}>SOS Name</Text>
+        <Text style={styles.value}>{profile?.emergency_message_name || 'Not set'}</Text>
+
+        <Text style={styles.label}>Risk Threshold</Text>
+        <Text style={styles.value}>
+          {profile?.default_risk_threshold ? `${profile.default_risk_threshold}%` : '70%'}
+        </Text>
+      </View>
+
+      <View style={styles.infoCard}>
+        <Text style={styles.sectionTitle}>What&apos;s Ready</Text>
+        <Text style={styles.bullet}>Your login now maps readings and alerts to a real backend user.</Text>
+        <Text style={styles.bullet}>Contacts added from the dashboard are stored in the database.</Text>
+        <Text style={styles.bullet}>SOS requests can include your saved profile identity.</Text>
+      </View>
+
+      <Pressable style={styles.logoutButton} onPress={handleLogout}>
+        <Text style={styles.logoutButtonText}>Log Out</Text>
+      </Pressable>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  headerImage: {
-    color: '#808080',
-    bottom: -90,
-    left: -35,
-    position: 'absolute',
+  container: {
+    flexGrow: 1,
+    padding: 20,
+    gap: 16,
+    backgroundColor: '#0B1220',
   },
-  titleContainer: {
-    flexDirection: 'row',
-    gap: 8,
+  heroCard: {
+    backgroundColor: '#F97316',
+    borderRadius: 24,
+    padding: 22,
+  },
+  eyebrow: {
+    color: '#FBF7F0',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 2,
+    marginBottom: 8,
+  },
+  title: {
+    color: '#0B1220',
+    fontSize: 28,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  subtitle: {
+    color: '#1E293B',
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  infoCard: {
+    backgroundColor: '#111827',
+    borderRadius: 20,
+    padding: 20,
+  },
+  sectionTitle: {
+    color: '#F8FAFC',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 14,
+  },
+  label: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  value: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  bullet: {
+    color: '#E2E8F0',
+    fontSize: 14,
+    lineHeight: 22,
+    marginBottom: 8,
+  },
+  logoutButton: {
+    backgroundColor: '#38BDF8',
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  logoutButtonText: {
+    color: '#0B1220',
+    fontSize: 16,
+    fontWeight: '800',
   },
 });

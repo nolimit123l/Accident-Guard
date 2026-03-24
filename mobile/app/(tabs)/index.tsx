@@ -541,8 +541,8 @@ export default function HomeScreen() {
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Why the score changed</Text>
-          {riskAnalysis.reasons.length > 0 ? riskAnalysis.reasons.map((reason) => (
-            <View key={reason} style={styles.reasonChip}><MaterialCommunityIcons name="chevron-right" size={16} color="#D07A24" /><Text style={styles.reasonText}>{reason}</Text></View>
+          {riskAnalysis.reasons.length > 0 ? riskAnalysis.reasons.map((reason, index) => (
+            <View key={`${reason}-${index}`} style={styles.reasonChip}><MaterialCommunityIcons name="chevron-right" size={16} color="#D07A24" /><Text style={styles.reasonText}>{reason}</Text></View>
           )) : <Text style={styles.emptyText}>No critical triggers yet. Start monitoring to see live explanations.</Text>}
         </View>
 
@@ -570,7 +570,7 @@ export default function HomeScreen() {
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Activity</Text>
-          {systemLogs.length > 0 ? systemLogs.map((log) => <Text key={log} style={styles.logEntry}>{log}</Text>) : <Text style={styles.emptyText}>No activity yet. Start monitoring to begin the trip.</Text>}
+          {systemLogs.length > 0 ? systemLogs.map((log, index) => <Text key={`${log}-${index}`} style={styles.logEntry}>{log}</Text>) : <Text style={styles.emptyText}>No activity yet. Start monitoring to begin the trip.</Text>}
         </View>
       </ScrollView>
 
