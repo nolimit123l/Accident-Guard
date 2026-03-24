@@ -23,14 +23,39 @@ FEATURE_COLS = [
 ]
 
 
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+DISABLE_ML_MODELS = _env_flag(
+    "REFLEX_DISABLE_ML_MODELS",
+    default=os.getenv("RENDER", "").strip().lower() == "true",
+)
+
+
 def _load(path):
     p = os.path.join(ML_DIR, path)
-    return joblib.load(p) if os.path.exists(p) else None
+    if DISABLE_ML_MODELS or not os.path.exists(p):
+        return None
+    try:
+        return joblib.load(p)
+    except Exception as exc:
+        logger.warning("Could not load ML artifact %s: %s", path, exc)
+        return None
 
 
 def _load_npz(path):
     p = os.path.join(ML_DIR, path)
-    return np.load(p) if os.path.exists(p) else None
+    if DISABLE_ML_MODELS or not os.path.exists(p):
+        return None
+    try:
+        return np.load(p)
+    except Exception as exc:
+        logger.warning("Could not load ML normalization artifact %s: %s", path, exc)
+        return None
 
 
 # Lazy-load TensorFlow models
@@ -40,6 +65,8 @@ _mlp_model = None
 
 def _get_cnn():
     global _cnn_model
+    if DISABLE_ML_MODELS:
+        return None
     if _cnn_model is not None:
         return _cnn_model
     try:
@@ -55,6 +82,8 @@ def _get_cnn():
 
 def _get_mlp():
     global _mlp_model
+    if DISABLE_ML_MODELS:
+        return None
     if _mlp_model is not None:
         return _mlp_model
     try:
@@ -68,17 +97,29 @@ def _get_mlp():
     return None
 
 
-# Load on module init
-_rf_model = _load('accident_model.pkl')
-_le_weekday = _load('encoder_weekday.pkl')
-_le_weather = _load('encoder_weather.pkl')
-_le_traffic = _load('encoder_traffic.pkl')
-_le_road = _load('encoder_road.pkl')
-_le_region = _load('encoder_region.pkl')
-_mlp_scaler = _load('mlp_scaler.pkl')
-_anomaly_detector = _load('anomaly_detector.pkl')
-_anomaly_scaler = _load('anomaly_scaler.pkl')
-_cnn_norm = _load_npz('cnn_normalization.npz')
+if DISABLE_ML_MODELS:
+    logger.info("REFLEX ML models are disabled; using rule-based scoring only.")
+    _rf_model = None
+    _le_weekday = None
+    _le_weather = None
+    _le_traffic = None
+    _le_road = None
+    _le_region = None
+    _mlp_scaler = None
+    _anomaly_detector = None
+    _anomaly_scaler = None
+    _cnn_norm = None
+else:
+    _rf_model = _load('accident_model.pkl')
+    _le_weekday = _load('encoder_weekday.pkl')
+    _le_weather = _load('encoder_weather.pkl')
+    _le_traffic = _load('encoder_traffic.pkl')
+    _le_road = _load('encoder_road.pkl')
+    _le_region = _load('encoder_region.pkl')
+    _mlp_scaler = _load('mlp_scaler.pkl')
+    _anomaly_detector = _load('anomaly_detector.pkl')
+    _anomaly_scaler = _load('anomaly_scaler.pkl')
+    _cnn_norm = _load_npz('cnn_normalization.npz')
 
 RF_LOADED = _rf_model is not None and all([_le_weekday, _le_weather, _le_traffic, _le_road, _le_region])
 MLP_LOADED = _get_mlp() is not None and _mlp_scaler is not None
