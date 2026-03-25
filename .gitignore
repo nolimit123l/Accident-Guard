@@ -1,1 +1,47 @@
+# Environment files
 backend/.env
+backend/.env.*
+mobile/.env
+mobile/.env.*
+!.env.example
+!backend/.env.example
+!mobile/.env.example
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc.*
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+backend/venv/
+mobile/venv/
+
+# Local databases and runtime files
+backend/db.sqlite3
+*.log
+
+# Node / Expo artifacts
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/web-build/
+mobile/.metro-health-check*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/

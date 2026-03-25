@@ -38,6 +38,7 @@ yarn-error.*
 
 app-example
 
-# generated native folders
-/ios
-/android
+# Android generated/sensitive artifacts
+android/app/debug.keystore
+android/app/src/main/res/mipmap-*/
+android/app/src/main/res/drawable-*/splashscreen_logo.png
